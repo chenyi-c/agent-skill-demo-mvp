@@ -1,0 +1,20 @@
+# Python Cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments & Virtual Envs
+.env
+.venv/
+venv/
+ENV/
+env/
+
+# IDE and Editor configs
+.vscode/
+.idea/
+
+# Testing & Logs
+.pytest_cache/
+*.log
+.agents/
