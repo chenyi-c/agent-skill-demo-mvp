@@ -1,150 +1,141 @@
-# Code Navi - Agent Skill Web Demo MVP
+# 智教码航 - 智能体 Skill 调用与评测演示平台 (Web Demo MVP)
 
-Code Navi is a lightweight, AI-native web demonstration MVP designed to showcase how an AI Agent can dynamically route user prompts to specialized capabilities (Skills) and safely execute them.
+本项目是“智教码航 (Code Navi)”数智化人才培养平台的科研/助研端核心技术演示原型（MVP）。
 
-This project is decoupled into:
-1. **Frontend Web UI**: A clean, premium dashboard built with Vanilla HTML, CSS, and JS (incorporating glassmorphism and real-time execution tracing).
-2. **FastAPI API Layer**: RESTful endpoints for checking health, listing skills, and triggering agent requests.
-3. **Agent Orchestration Layer**: The intelligent router that parses user intent (supporting both rule-based heuristics and LLM-based JSON function selection with fallback).
-4. **Skill System Layer**: A modular, extensible framework for running sandboxed tasks.
+项目的核心目标是**验证 AI Agent 在对话中进行“意图智能路由分发”并“安全调用自定义技能 (Skills)”的闭环能力**。它为导师和评审专家直观展示了 AI 如何从传统的“满嘴跑火车（学术幻觉）”转变为“基于严谨工具与权威数据源执行任务”的智能体。
 
 ---
 
-## 🚀 Quick Start
+## 🌟 核心设计亮点
 
-### 1. Prerequisites
-Ensure you have **Python 3.11 or higher** installed.
+1.  **AI 原生对话入口**：学生无需在死板的菜单表单中跳转，只需在聊天框输入自然语言需求，Agent 自动分发任务。
+2.  **前后端与业务解耦**：前端（原生极简网页）、API 接口层（FastAPI）、Agent 决策路由层、Skill 业务实现层完全物理隔离，便于多人协同开发与后期客户端复用。
+3.  **双模路由与规则降级**：
+    *   **大模型智能路由**：配置 API 后，使用 LLM 自主读取技能描述并输出 JSON 决策。
+    *   **规则匹配降级**：无网络或未配置 Key 时，自动降级为本地高吞吐的规则解析器，**确保演示现场 100% 稳定，不崩溃**。
+4.  **安全计算沙箱**：计算器技能手写了逆波兰（RPN）表达式解析器，彻底封杀危险的 `eval()` 执行，防范远程命令执行（RCE）风险。
 
-### 2. Installation
-Install the required packages:
+---
+
+## 📦 快速开始与环境安装
+
+### 1. 运行环境要求
+*   **Python 3.11 或以上版本**。
+*   建议在项目根目录下安装依赖。
+
+### 2. 安装依赖包
+在项目根目录运行以下命令安装运行与测试所需的依赖：
 ```bash
 pip install -r requirements.txt
-```
-
-*(Optional)* If you want to run the unit test suite, also install `pytest-asyncio`:
-```bash
 pip install pytest-asyncio
 ```
 
-### 3. Model Configuration (Optional)
-By default, the Agent operates in **Rule-based Auto-Routing mode** (no API Key required). It detects math formulas, summary keywords, and falls back to echo routing automatically.
-
-To enable **Model-based Routing** (where the LLM reads skill descriptions and outputs a JSON decision) and **AI Text Summarization**:
-1. Create a `.env` file in the root directory:
-   ```bash
-   LLM_API_KEY=your_openai_compatible_api_key
-   LLM_BASE_URL=https://api.openai.com/v1  # Or Spark API / local Qwen base url
-   LLM_MODEL=gpt-3.5-turbo
-   ```
-
-### 4. Running the Web Server
-Launch the server using:
+### 3. 一键启动服务
+在终端内运行以下命令启动本地 Web 服务器：
 ```bash
 python run.py
 ```
-Or start Uvicorn directly:
-```bash
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
+当看到终端显示 `Uvicorn running on http://127.0.0.1:8000` 时，即表明服务启动成功。
+
+### 4. 访问系统
+*   **演示网页端（推荐）**：[http://localhost:8000/](http://localhost:8000/) （使用浏览器直接打开）
+*   **API 交互式文档 (Swagger UI)**：[http://localhost:8000/docs](http://localhost:8000/docs)
+*   **健康检查接口**：[http://localhost:8000/health](http://localhost:8000/health)
 
 ---
 
-## 🌐 Web URLs
+## 🔑 大模型 API 配置指南（如何在网页端填入 API）
 
-*   **Frontend Dashboard (Home)**: [http://localhost:8000/](http://localhost:8000/)
-*   **Swagger API Documentation**: [http://localhost:8000/docs](http://localhost:8000/docs)
-*   **Health Check Endpoint**: [http://localhost:8000/health](http://localhost:8000/health)
+本平台完美兼容 OpenAI API 规范。你可以直接在网页左侧的**【大模型 API 配置】**面板中填入你所购买或申请的 API 服务。
 
----
+### 推荐配置一：DeepSeek 官方 API（性价比最高，国内直连）
+*   **接口秘钥 (API Key)**：粘贴你在 DeepSeek 开放平台申请到的密钥（以 `sk-` 开头）。
+*   **接口基础路径 (Base URL)**：`https://api.deepseek.com/v1`
+*   **模型名称 (Model)**：`deepseek-chat`
 
-## 🛠️ API Reference
+### 推荐配置二：硅基流动 (SiliconFlow) 平台（注册即送大量免费额度）
+*   **接口秘钥 (API Key)**：粘贴你注册硅基流动后在个人控制台生成的密钥。
+*   **接口基础路径 (Base URL)**：`https://api.siliconflow.cn/v1`
+*   **模型名称 (Model)**：`Qwen/Qwen2.5-7B-Instruct` (推荐通义千问)
 
-### 1. Chat Router Endpoint
-*   **Path**: `POST /api/chat`
-*   **Payload**:
-    ```json
-    {
-      "message": "Calculate (3.5 * 4) + 12",
-      "preferred_skill": null  // Optional: "echo_skill", "calculator_skill", "summary_skill"
-    }
-    ```
-*   **Response**:
-    ```json
-    {
-      "request_id": "893d5a42-7cf1-4560-bf65-f12b23ea890e",
-      "success": true,
-      "reply": "Calculation Result: (3.5 * 4) + 12 = 26.0",
-      "route_mode": "Auto (Rule-based)",
-      "skill_name": "calculator_skill",
-      "reason": "Rule-based: Detected purely mathematical expression characters.",
-      "inputs": {
-        "expression": "(3.5 * 4) + 12"
-      },
-      "outputs": {
-        "result": 26.0,
-        "formatted": "(3.5 * 4) + 12 = 26.0"
-      },
-      "duration_ms": 0.45,
-      "error": null
-    }
-    ```
+### 推荐配置三：Ollama 本地部署模型（100% 免费，断网可用）
+*   **接口秘钥 (API Key)**：随便填（如 `ollama`），本地不需要鉴权。
+*   **接口基础路径 (Base URL)**：`http://localhost:11434/v1`
+*   **模型名称 (Model)**：`qwen2.5:7b` (根据你本地 pull 的模型填写)
 
-### 2. List Active Skills
-*   **Path**: `GET /api/skills`
-*   **Response**: Returns metadata and parameter schemas of all enabled skills.
+*填入后点击“保存并应用配置”，后台会自动升级为“智能路由”状态，并加密脱敏显示 Key。*
 
 ---
 
-## 🧩 How to Add a New Skill
+## 🧩 如何新增一个自定义 Skill？
 
-Adding a new skill is extremely simple and requires **zero changes** to the FastAPI routes or the frontend code.
+增加新技能采用**零侵入式设计**，你**完全不需要**修改任何 API 路由代码，也不用修改任何前端网页代码。
 
-### Step 1: Create the Skill File
-Create a new file in `app/services/skills/` (e.g., `my_skill.py`) inheriting from `BaseSkill`:
+### 步骤 1：在 `app/services/skills/` 目录下创建技能文件
+例如，创建一个翻译技能文件 `translation.py`，继承自 `BaseSkill`，并定义它的 Pydantic 输入参数 Schema：
+
 ```python
+# app/services/skills/translation.py
+import time
+from typing import Dict, Any
 from pydantic import BaseModel, Field
 from app.services.skills.base import BaseSkill, SkillResult
-from typing import Dict, Any
-import time
 
-class MyInputSchema(BaseModel):
-    user_name: str = Field(..., description="The user's name to greet.")
+# 1. 定义该 Skill 需要接收的输入参数（系统会自动将其转换为 schema 传给 Agent 决策）
+class TranslationInput(BaseModel):
+    text: str = Field(..., description="需要翻译的源文本内容")
+    target_lang: str = Field(default="英文", description="目标语言，如：英文、中文、日文")
 
-class MyNewSkill(BaseSkill):
-    name = "my_new_skill"
-    display_name = "Personalized Greeter"
-    description = "Greets a user by name."
-    input_schema = MyInputSchema
+# 2. 编写技能类
+class TranslationSkill(BaseSkill):
+    name = "translation_skill"                          # 技能唯一ID（小写字母加下划线）
+    display_name = "智能翻译器"                        # 网页上展示的名字
+    description = "将输入的文本翻译成指定的目标语言。"  # 技能功能描述（Agent根据此描述决定是否调用）
+    input_schema = TranslationInput
 
     async def execute(self, params: Dict[str, Any]) -> SkillResult:
         start_time = time.perf_counter()
         try:
             validated = self.input_schema(**params)
+            
+            # 这里写你技能的具体业务逻辑，比如调用翻译 API 或规则翻译
+            result_text = f"已将 '{validated.text}' 翻译为 {validated.target_lang}"
+            
             duration = (time.perf_counter() - start_time) * 1000.0
             return SkillResult(
                 success=True,
                 skill_name=self.name,
-                data={"reply": f"Hello, {validated.user_name}!"},
+                data={"result": result_text},
                 duration_ms=duration
             )
         except Exception as e:
-            return SkillResult(success=False, skill_name=self.name, data=None, error=str(e))
+            duration = (time.perf_counter() - start_time) * 1000.0
+            return SkillResult(success=False, skill_name=self.name, data=None, error=str(e), duration_ms=duration)
 ```
 
-### Step 2: Register it in Registry
-Open `app/services/skills/__init__.py` and register it:
+### 步骤 2：在技能包注册表里注册该技能
+打开 `app/services/skills/__init__.py`，导入你刚写好的技能，并进行实例化与注册：
+
 ```python
-from app.services.skills.my_skill import MyNewSkill
+# app/services/skills/__init__.py
+from app.services.skills.translation import TranslationSkill  # 1. 导入
 from app.services.registry import registry
 
-my_new_skill = MyNewSkill()
-registry.register(my_new_skill)
+# ... 其他技能实例化 ...
+translation_skill = TranslationSkill()                        # 2. 实例化
+
+# ... 其他技能注册 ...
+registry.register(translation_skill)                          # 3. 注册生效
 ```
-The Frontend Skill Library Panel and the Agent Router will automatically discover it on startup.
+
+保存文件，重启服务并刷新浏览器。新技能将自动出现在左侧技能库中，并无缝加入 Agent 的智能分发大脑中。
 
 ---
 
-## 🔒 Security & Sandboxing Features
-1.  **No `eval()` execution**: The mathematical calculator uses a custom token parser (Shunting-yard algorithm) to evaluate equations securely. Arbitrary code strings are rejected before parsing.
-2.  **Mock Fallback**: If LLM API Keys are missing or the provider throws errors, the Agent instantly downgrades to local keyword-based rule routing to avoid crashing the server.
-3.  **Strict Parameter Constraints**: Input parameters are strictly validated via Pydantic model schemas prior to execution.
+## 🧪 运行回归测试
+
+我们提供了基于 `pytest` 的完整自动化单元测试及集成测试用例，运行以下命令即可：
+```bash
+python -m pytest
+```
+测试会自动模拟规则分发、计算器除零边界值防御、本地配置降级等 14 项完整场景，确保系统的稳定健壮。

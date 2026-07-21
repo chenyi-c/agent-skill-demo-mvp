@@ -18,3 +18,11 @@ env/
 .pytest_cache/
 *.log
 .agents/
+
+# Non-demo PDFs, Documents & Images (Untracked)
+*.pdf
+会议图片/
+会议文件/
+.codex/
+docs/
+skills/
