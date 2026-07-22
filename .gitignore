@@ -19,6 +19,10 @@ env/
 *.log
 .agents/
 
+# Local agent workspaces and temporary render artifacts
+.worktrees/
+tmp/
+
 # Non-demo PDFs, Documents & Images (Untracked)
 *.pdf
 会议图片/
