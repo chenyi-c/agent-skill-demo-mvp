@@ -29,6 +29,7 @@ tmp/
 会议文件/
 .codex/
 docs/
+skills/
 
 # Keep implementation decisions and reusable research-skill assets versioned.
 !docs/
