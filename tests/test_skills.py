@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 from app.services.skills.base import SkillResult
 from app.services.skills.echo import EchoSkill
@@ -5,6 +7,8 @@ from app.services.skills.calculator import CalculatorSkill, safe_eval
 from app.services.skills.summary import TextSummarySkill, local_summary
 from app.services.registry import SkillRegistry
 from app.services.skills.research_clarification import ResearchClarificationSkill
+from app.services.skills.academic_search import AcademicSearchSkill
+from app.services.skills import academic_search
 
 def test_skill_registry():
     registry = SkillRegistry()
@@ -142,4 +146,55 @@ async def test_research_clarification_collects_a_complete_brief():
         "expected_output": "一份可执行的研究方案",
     }
     assert "人工智能" in result.data["query"]
+
+
+@pytest.mark.asyncio
+async def test_academic_search_invokes_all_sources_and_clamps_limit():
+    captured = []
+
+    def runner(command):
+        captured.append(command)
+        return '[{"title": "A paper", "source": "arxiv"}]'
+
+    skill = AcademicSearchSkill(command_runner=runner)
+    result = await skill.execute({"query": "retrieval augmented generation", "limit": 99})
+
+    assert result.success is True
+    assert captured == [[
+        "paper-search", "search", "retrieval augmented generation", "-n", "5",
+        "-s", "arxiv,semantic,openalex,crossref",
+    ]]
+    assert result.data["results"] == [{"title": "A paper", "source": "arxiv"}]
+
+
+@pytest.mark.asyncio
+async def test_academic_search_parses_object_results_and_reports_missing_executable():
+    skill = AcademicSearchSkill(command_runner=lambda _: '{"results": [{"title": "B paper"}]}')
+    result = await skill.execute({"query": "agents", "limit": 0})
+    assert result.success is True
+    assert result.data["limit"] == 1
+    assert result.data["results"] == [{"title": "B paper"}]
+
+    unavailable = AcademicSearchSkill(command_runner=lambda _: (_ for _ in ()).throw(FileNotFoundError()))
+    failure = await unavailable.execute({"query": "agents"})
+    assert failure.success is False
+    assert "install paper-search-mcp" in failure.error.lower()
+    assert failure.data is None
+
+
+@pytest.mark.asyncio
+async def test_academic_search_uses_finite_timeout_and_reports_timeout(monkeypatch):
+    captured = {}
+
+    def timed_out_run(*args, **kwargs):
+        captured.update(kwargs)
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(academic_search.subprocess, "run", timed_out_run)
+    result = await AcademicSearchSkill().execute({"query": "slow query"})
+
+    assert captured["timeout"] > 0
+    assert result.success is False
+    assert "timed out" in result.error.lower()
+    assert result.data is None
 
