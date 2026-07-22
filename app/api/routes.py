@@ -53,7 +53,8 @@ async def chat(request: ChatRequest):
     # Run the orchestrator
     result = await orchestrator.execute_task(
         user_input=request.message,
-        preferred_skill=request.preferred_skill
+        preferred_skill=request.preferred_skill,
+        session_id=request.session_id,
     )
     
     return ChatResponse(
@@ -66,7 +67,8 @@ async def chat(request: ChatRequest):
         inputs=result["inputs"],
         outputs=result["outputs"],
         duration_ms=result["duration_ms"],
-        error=result["error"]
+        error=result["error"],
+        session_id=(result["outputs"] or {}).get("session_id") if isinstance(result["outputs"], dict) else None,
     )
 
 class ConfigRequest(BaseModel):

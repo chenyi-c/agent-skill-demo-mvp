@@ -544,7 +544,8 @@
     </div>
 
     <script>
-        const API_URL = "http://localhost:8000";
+        const API_URL = "";
+        let researchSessionId = sessionStorage.getItem("researchSessionId");
 
         // Load active skills at startup
         async function loadSkills() {
@@ -554,7 +555,9 @@
                 const skills = await res.json();
                 
                 const skillListDiv = document.getElementById("skillList");
+                const skillSelect = document.getElementById("skillSelect");
                 skillListDiv.innerHTML = "";
+                skillSelect.innerHTML = '<option value="auto">智能分发模式 (自动匹配 Skill)</option>';
                 
                 skills.forEach(skill => {
                     const card = document.createElement("div");
@@ -562,16 +565,20 @@
                     card.onclick = () => {
                         document.getElementById("skillSelect").value = skill.name;
                     };
+                    const option = document.createElement("option");
+                    option.value = skill.name;
+                    option.textContent = `强制指定: ${skill.display_name}`;
+                    skillSelect.appendChild(option);
                     
                     const paramsJson = JSON.stringify(skill.parameters_schema, null, 2);
                     
                     card.innerHTML = `
                         <div class="skill-card-header">
-                            <span class="skill-name">${skill.display_name}</span>
-                            <span class="skill-version">v${skill.version}</span>
+                            <span class="skill-name">${escapeHtml(skill.display_name)}</span>
+                            <span class="skill-version">v${escapeHtml(skill.version)}</span>
                         </div>
-                        <div class="skill-desc">${skill.description}</div>
-                        <div class="skill-schema">${paramsJson}</div>
+                        <div class="skill-desc">${escapeHtml(skill.description)}</div>
+                        <div class="skill-schema">${escapeHtml(paramsJson)}</div>
                     `;
                     skillListDiv.appendChild(card);
                 });
@@ -690,12 +697,21 @@
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         message: message,
-                        preferred_skill: preferredSkill
+                        preferred_skill: preferredSkill,
+                        session_id: researchSessionId
                     })
                 });
                 
                 if (!res.ok) throw new Error(`HTTP 异常 ${res.status}`);
                 const data = await res.json();
+                if (data.session_id) {
+                    researchSessionId = data.session_id;
+                    sessionStorage.setItem("researchSessionId", researchSessionId);
+                }
+                if (data.outputs && data.outputs.completed) {
+                    researchSessionId = null;
+                    sessionStorage.removeItem("researchSessionId");
+                }
                 
                 // Show JSON in Inspector panel
                 document.getElementById("jsonInspector").textContent = JSON.stringify(data, null, 2);
@@ -777,9 +793,9 @@
                         </svg>
                         <span>智能体路由决策步骤追踪</span>
                     </div>
-                    <div class="trace-step"><strong>路由模式</strong>: ${data.route_mode}</div>
-                    <div class="trace-step"><strong>所选 Skill</strong>: ${data.skill_name}</div>
-                    <div class="trace-step"><strong>决策依据</strong>: ${data.reason}</div>
+                    <div class="trace-step"><strong>路由模式</strong>: ${escapeHtml(data.route_mode)}</div>
+                    <div class="trace-step"><strong>所选 Skill</strong>: ${escapeHtml(data.skill_name)}</div>
+                    <div class="trace-step"><strong>决策依据</strong>: ${escapeHtml(data.reason)}</div>
                     <div class="trace-step"><strong>输入参数</strong>: ${escapeHtml(inputsStr)}</div>
                     <div class="trace-step"><strong>输出结果</strong>: ${escapeHtml(outputsStr)}</div>
                     <div class="trace-step"><strong>执行状态</strong>: <span style="color: ${statusBadgeColor}; font-weight:bold;">${statusText}</span></div>

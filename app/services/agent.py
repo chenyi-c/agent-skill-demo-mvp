@@ -12,13 +12,13 @@ class AgentOrchestrator:
     def __init__(self):
         pass
 
-    def _rule_route(self, user_input: str) -> Tuple[str, Dict[str, Any], str]:
+    def _rule_route(self, user_input: str, session_id: Optional[str] = None) -> Tuple[str, Dict[str, Any], str]:
         """
         Rule-based router based on keyword and input analysis.
         Returns: (skill_name, arguments_dict, reason)
         """
         cleaned = user_input.strip()
-        
+
         # 1. Check for math formulas (simple calculator heuristic)
         math_chars_only = re.sub(r'\s+', '', cleaned)
         if re.match(r'^[0-9.+\-*/()]+$', math_chars_only) and len(math_chars_only) > 1:
@@ -41,6 +41,14 @@ class AgentOrchestrator:
             if len(payload) < 5:
                 payload = cleaned
             return "summary_skill", {"text": payload, "max_sentences": 3}, "基于规则：检测到文本总结关键字。"
+
+        literature_keywords = ["论文", "文献", "检索", "paper", "literature"]
+        if any(keyword in cleaned.lower() for keyword in literature_keywords):
+            return "academic_search_skill", {"query": cleaned}, "基于规则：检测到学术文献检索需求。"
+
+        research_keywords = ["研究", "课题", "方向", "科研", "rag"]
+        if session_id or any(keyword in cleaned.lower() for keyword in research_keywords):
+            return "research_clarification_skill", {"message": cleaned, "session_id": session_id}, "基于规则：检测到科研需求确认。"
 
         # 3. Default fallback: EchoSkill
         return "echo_skill", {"text": cleaned}, "基于规则：默认缺省分发 (Echo)。"
@@ -122,7 +130,7 @@ class AgentOrchestrator:
         except Exception as e:
             return None
 
-    async def execute_task(self, user_input: str, preferred_skill: Optional[str] = None) -> Dict[str, Any]:
+    async def execute_task(self, user_input: str, preferred_skill: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Coordinates the entire flow.
         """
@@ -144,18 +152,26 @@ class AgentOrchestrator:
                 arguments = {"expression": formula}
             elif skill_name == "summary_skill":
                 arguments = {"text": user_input, "max_sentences": 3}
+            elif skill_name == "research_clarification_skill":
+                arguments = {"message": user_input, "session_id": session_id}
+            elif skill_name == "academic_search_skill":
+                arguments = {"query": user_input}
             else:
                 arguments = {"text": user_input}
         else:
             decision = None
-            if settings.LLM_API_KEY:
-                decision = await self._llm_route(user_input)
-            
-            if decision:
-                skill_name, arguments, route_reason = decision
+            if session_id:
+                skill_name, arguments, route_reason = self._rule_route(user_input, session_id)
+                route_mode = "智能路由 (科研会话恢复)"
             else:
-                skill_name, arguments, route_reason = self._rule_route(user_input)
-                route_mode = "智能路由 (规则降级 - 开启LLM)" if settings.LLM_API_KEY else "智能路由 (规则匹配)"
+                if settings.LLM_API_KEY:
+                    decision = await self._llm_route(user_input)
+
+                if decision:
+                    skill_name, arguments, route_reason = decision
+                else:
+                    skill_name, arguments, route_reason = self._rule_route(user_input, session_id)
+                    route_mode = "智能路由 (规则降级 - 开启LLM)" if settings.LLM_API_KEY else "智能路由 (规则匹配)"
 
         # 2. Validation & Execution phase
         skill = registry.get(skill_name)
@@ -199,6 +215,8 @@ class AgentOrchestrator:
                 reply = f"计算结果: {result.data.get('formatted')}"
             elif skill_name == "summary_skill":
                 reply = f"智能摘要提炼:\n{result.data.get('summary')}"
+            elif skill_name == "academic_search_skill":
+                reply = f"已从受限学术源返回 {len(result.data.get('results', []))} 条结果。"
             else:
                 reply = result.data.get("reply", str(result.data))
         else:

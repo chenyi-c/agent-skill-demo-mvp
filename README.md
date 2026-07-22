@@ -139,3 +139,24 @@ registry.register(translation_skill)                          # 3. 注册生效
 python -m pytest
 ```
 测试会自动模拟规则分发、计算器除零边界值防御、本地配置降级等 14 项完整场景，确保系统的稳定健壮。
+
+---
+
+## 🔬 科研 Skill 实验台
+
+新增两个可迁移到团队 Agent Kernel 的 Skill：
+
+1. **科研需求确认**：使用浏览器会话 ID 保存五项研究状态（领域、核心问题、数据/方法、约束、交付物），每轮只提出一个带选项的问题；信息完整后生成研究简报和检索词。
+2. **受限学术检索**：仅调用 `arxiv`、`semantic`、`openalex`、`crossref` 四个来源，不执行泛网页搜索。单源故障或超时会明确返回错误，不伪造论文结果。
+
+学术检索采用 [openags/paper-search-mcp](https://github.com/openags/paper-search-mcp) 的 CLI 适配层。首次使用前，在已安装 `uv` 的环境执行：
+
+```bash
+uv tool install paper-search-mcp
+```
+
+未安装 CLI 时，网页会显示安装提示；需求确认 Skill 仍可正常演示。执行测试：
+
+```bash
+python -m pytest
+```

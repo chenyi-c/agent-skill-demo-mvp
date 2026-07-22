@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional, List
 class ChatRequest(BaseModel):
     message: str = Field(..., description="The user prompt or query.")
     preferred_skill: Optional[str] = Field(None, description="Manually force the use of a specific skill.")
+    session_id: Optional[str] = Field(None, description="Optional multi-turn research session ID.")
 
 class ChatResponse(BaseModel):
     request_id: str = Field(..., description="Unique transaction ID for this chat request.")
@@ -16,6 +17,7 @@ class ChatResponse(BaseModel):
     outputs: Optional[Dict[str, Any]] = Field(None, description="Raw outputs returned by the skill.")
     duration_ms: float = Field(..., description="Total execution latency in milliseconds.")
     error: Optional[str] = Field(None, description="Error message, if any occurred.")
+    session_id: Optional[str] = Field(None, description="Research session ID when a Skill creates or continues one.")
 
 class SkillInfo(BaseModel):
     name: str
