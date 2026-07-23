@@ -8,6 +8,7 @@ from app.services.skills.summary import TextSummarySkill, local_summary
 from app.services.registry import SkillRegistry
 from app.services.skills.research_clarification import ResearchClarificationSkill
 from app.services.skills.academic_search import AcademicSearchSkill
+from app.services.skills.paper_evidence_card import PaperEvidenceCardSkill
 from app.services.skills import academic_search
 
 def test_skill_registry():
@@ -118,6 +119,17 @@ async def test_research_clarification_tracks_one_session_to_completion():
     assert result.data["research_brief"]["domain"] == "RAG 幻觉"
     assert result.data["research_brief"]["expected_output"] == "研究简报和可运行原型"
     assert "RAG 幻觉" in result.data["query"]
+    assert result.data["research_plan"]["mode"] == "rule_fallback"
+
+@pytest.mark.asyncio
+async def test_paper_evidence_card_uses_abstract_or_safe_metadata_fallback():
+    skill = PaperEvidenceCardSkill()
+    abstract_card = await skill.execute({"title": "Paper A", "abstract": "We evaluate retrieval methods."})
+    assert abstract_card.success and abstract_card.data["evidence_card"]["source_status"] == "abstract_only"
+    metadata_card = await skill.execute({"title": "Paper B"})
+    assert metadata_card.success and metadata_card.data["evidence_card"]["source_status"] == "metadata_only"
+    missing = await skill.execute({})
+    assert missing.success is False
 
 
 @pytest.mark.asyncio

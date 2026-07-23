@@ -63,6 +63,20 @@ class ResearchClarificationSkill(BaseSkill):
         question, options = self._questions[field]
         return {"next_field": field, "next_question": question, "options": options}
 
+    def _rule_plan(self, brief: Dict[str, str]) -> Dict[str, Any]:
+        topic = f"面向{brief['domain']}的{brief['core_problem']}"
+        keywords = [brief['domain'], brief['core_problem'], brief['data_and_method']]
+        return {
+            "research_question": topic,
+            "research_goals": ["明确可验证的问题边界", "建立可复现实验对照", "产出" + brief['expected_output']],
+            "candidate_methods_or_baselines": [brief['data_and_method'], "公开强基线", "消融对照实验"],
+            "datasets_or_metrics": ["优先使用与问题匹配的公开基准", "任务成功率/准确率", "成本与时延"],
+            "two_week_mvp": ["第 1-3 天：确定基线与数据", "第 4-9 天：实现最小实验", "第 10-14 天：复现实验、分析风险并整理报告"],
+            "risks_and_mitigations": [f"约束：{brief['constraints']}；优先缩小问题范围", "数据或工具不可用时使用公开基准与可复现基线"],
+            "search_keywords": [item for item in keywords if item],
+            "mode": "rule_fallback",
+        }
+
     @staticmethod
     def _needs_recommendation(message: str) -> bool:
         normalized = message.replace(" ", "").lower()
@@ -147,6 +161,7 @@ class ResearchClarificationSkill(BaseSkill):
                     "session_id": session_id,
                     "completed": True,
                     "research_brief": brief,
+                    "research_plan": self._rule_plan(brief),
                     "query": query,
                     "reply": "科研需求已确认，可以开始受限学术检索。",
                 },

@@ -162,6 +162,8 @@ class AgentOrchestrator:
                 arguments = {"message": user_input, "session_id": session_id}
             elif skill_name == "academic_search_skill":
                 arguments = {"query": user_input}
+            elif skill_name == "paper_evidence_card_skill":
+                arguments = {"title": user_input}
             else:
                 arguments = {"text": user_input}
         else:
