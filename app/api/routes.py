@@ -8,6 +8,7 @@ import os
 from app.models.chat import ChatRequest, ChatResponse, SkillInfo
 from app.services.registry import registry
 from app.services.agent import orchestrator
+from app.services.evaluation import list_evaluation_cases, run_evaluation
 
 # Initialize the route router
 router = APIRouter()
@@ -56,7 +57,6 @@ async def chat(request: ChatRequest):
         preferred_skill=request.preferred_skill,
         session_id=request.session_id,
     )
-    
     return ChatResponse(
         request_id=request_id,
         success=result["success"],
@@ -70,6 +70,18 @@ async def chat(request: ChatRequest):
         error=result["error"],
         session_id=(result["outputs"] or {}).get("session_id") if isinstance(result["outputs"], dict) else None,
     )
+
+
+@router.get("/api/evaluation/cases")
+def get_evaluation_cases():
+    """List fixed evaluation case metadata without exposing their prompts."""
+    return list_evaluation_cases()
+
+
+@router.post("/api/evaluation/run")
+async def run_agent_evaluation():
+    """Execute the in-memory deterministic evaluation suite."""
+    return await run_evaluation()
 
 class ConfigRequest(BaseModel):
     api_key: Optional[str] = None

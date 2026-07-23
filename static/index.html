@@ -434,6 +434,86 @@
             border-color: var(--text-secondary);
         }
 
+        .evaluation-panel {
+            background-color: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 14px;
+            display: grid;
+            gap: 10px;
+        }
+
+        .evaluation-heading {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .evaluation-heading strong {
+            font-size: 13px;
+        }
+
+        .evaluation-heading span {
+            color: var(--text-muted);
+            font-size: 11px;
+        }
+
+        .evaluation-button {
+            background-color: var(--accent-color);
+            color: var(--text-primary);
+            border: none;
+            padding: 8px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .evaluation-button:disabled {
+            background-color: var(--border-color);
+            color: var(--text-muted);
+            cursor: not-allowed;
+        }
+
+        .evaluation-metrics {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .evaluation-metric {
+            padding: 8px;
+            background-color: var(--bg-primary);
+            border-radius: 6px;
+            color: var(--text-secondary);
+            font-size: 10px;
+        }
+
+        .evaluation-metric strong {
+            display: block;
+            margin-top: 3px;
+            color: var(--text-primary);
+            font-size: 12px;
+        }
+
+        .evaluation-results {
+            display: grid;
+            gap: 5px;
+            color: var(--text-secondary);
+            font-size: 11px;
+        }
+
+        .evaluation-result {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .evaluation-result.pass { color: var(--success-color); }
+        .evaluation-result.fail { color: var(--error-color); }
+
         .error-banner {
             background-color: rgba(239, 68, 68, 0.1);
             border: 1px solid rgba(239, 68, 68, 0.2);
@@ -470,6 +550,20 @@
                     <input type="text" id="cfgModel" placeholder="gpt-3.5-turbo" style="width: 100%; background-color: var(--bg-primary); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 6px 8px; font-size: 11px; outline: none;">
                 </div>
                 <button onclick="saveConfig()" style="background-color: var(--accent-color); color: var(--text-primary); border: none; padding: 8px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; transition: background-color 0.2s;">保存并应用配置</button>
+            </div>
+
+            <div class="section-title">轻量评测</div>
+            <div class="evaluation-panel" id="evaluationPanel">
+                <div class="evaluation-heading">
+                    <strong>固定路由评测</strong>
+                    <span>仅内存运行，不保存内容</span>
+                </div>
+                <button class="evaluation-button" id="runEvaluationBtn" onclick="runEvaluation()">运行 4 个评测用例</button>
+                <div class="evaluation-metrics">
+                    <div class="evaluation-metric">通过率<strong id="passRate">等待运行</strong></div>
+                    <div class="evaluation-metric">路由模式<strong id="routeModeCounts">等待运行</strong></div>
+                </div>
+                <div class="evaluation-results" id="evaluationResults">正在加载评测用例...</div>
             </div>
 
             <div class="section-title">当前可用的 Skill 库</div>
@@ -546,6 +640,7 @@
     <script>
         const API_URL = "";
         let researchSessionId = sessionStorage.getItem("researchSessionId");
+        let evaluationCases = [];
 
         // Load active skills at startup
         async function loadSkills() {
@@ -604,6 +699,54 @@
                 }
             } catch (err) {
                 console.error("加载配置失败:", err);
+            }
+        }
+
+        async function loadEvaluationCases() {
+            const results = document.getElementById("evaluationResults");
+            try {
+                const res = await fetch(`${API_URL}/api/evaluation/cases`);
+                if (!res.ok) throw new Error(`HTTP 异常 ${res.status}`);
+                evaluationCases = await res.json();
+                results.textContent = `已加载 ${evaluationCases.length} 个固定用例，点击运行查看结果。`;
+            } catch (err) {
+                results.textContent = `评测用例加载失败: ${err.message}`;
+            }
+        }
+
+        async function runEvaluation() {
+            const button = document.getElementById("runEvaluationBtn");
+            const passRate = document.getElementById("passRate");
+            const routeModeCounts = document.getElementById("routeModeCounts");
+            const results = document.getElementById("evaluationResults");
+            button.disabled = true;
+            button.textContent = "评测运行中...";
+            results.textContent = "正在调用固定评测用例...";
+
+            try {
+                const res = await fetch(`${API_URL}/api/evaluation/run`, { method: "POST" });
+                if (!res.ok) throw new Error(`HTTP 异常 ${res.status}`);
+                const data = await res.json();
+                passRate.textContent = `${(data.pass_rate * 100).toFixed(0)}%`;
+                routeModeCounts.textContent = Object.entries(data.route_mode_counts)
+                    .map(([mode, count]) => `${count}× ${mode.replace("智能路由 ", "")}`)
+                    .join("；");
+                results.innerHTML = "";
+                data.results.forEach(result => {
+                    const caseInfo = evaluationCases.find(item => item.id === result.id);
+                    const row = document.createElement("div");
+                    row.className = `evaluation-result ${result.passed ? "pass" : "fail"}`;
+                    const label = caseInfo ? caseInfo.title : result.id;
+                    row.textContent = `${result.passed ? "✓" : "✕"} ${label} · ${result.actual_skill}`;
+                    results.appendChild(row);
+                });
+            } catch (err) {
+                passRate.textContent = "运行失败";
+                routeModeCounts.textContent = "-";
+                results.textContent = `评测运行失败: ${err.message}`;
+            } finally {
+                button.disabled = false;
+                button.textContent = "重新运行评测";
             }
         }
 
@@ -847,6 +990,7 @@
         // Initialize
         loadSkills();
         loadConfig();
+        loadEvaluationCases();
     </script>
 </body>
 </html>

@@ -130,7 +130,13 @@ class AgentOrchestrator:
         except Exception as e:
             return None
 
-    async def execute_task(self, user_input: str, preferred_skill: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
+    async def execute_task(
+        self,
+        user_input: str,
+        preferred_skill: Optional[str] = None,
+        session_id: Optional[str] = None,
+        force_rule_routing: bool = False,
+    ) -> Dict[str, Any]:
         """
         Coordinates the entire flow.
         """
@@ -160,7 +166,10 @@ class AgentOrchestrator:
                 arguments = {"text": user_input}
         else:
             decision = None
-            if session_id:
+            if force_rule_routing:
+                skill_name, arguments, route_reason = self._rule_route(user_input, session_id)
+                route_mode = "智能路由 (规则匹配)"
+            elif session_id:
                 skill_name, arguments, route_reason = self._rule_route(user_input, session_id)
                 route_mode = "智能路由 (科研会话恢复)"
             else:
