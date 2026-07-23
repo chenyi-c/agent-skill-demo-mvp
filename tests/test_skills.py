@@ -149,6 +149,59 @@ async def test_research_clarification_collects_a_complete_brief():
 
 
 @pytest.mark.asyncio
+async def test_research_clarification_uses_valid_llm_content(monkeypatch):
+    from app.core.config import settings
+    skill = ResearchClarificationSkill()
+    monkeypatch.setattr(settings, "LLM_API_KEY", "test-key")
+
+    async def llm_content(*_args):
+        return {"reply": "已了解你的方向。", "next_question": "你要优先解决什么问题？", "options": ["降低幻觉", "提高准确率", "减少成本"]}
+
+    monkeypatch.setattr(skill, "_call_llm", llm_content)
+    result = await skill.execute({"message": "RAG 幻觉"})
+
+    assert result.success is True
+    assert result.data["reply"] == "已了解你的方向。"
+    assert result.data["options"] == ["降低幻觉", "提高准确率", "减少成本"]
+
+
+@pytest.mark.asyncio
+async def test_research_clarification_falls_back_when_llm_fails(monkeypatch):
+    from app.core.config import settings
+    skill = ResearchClarificationSkill()
+    monkeypatch.setattr(settings, "LLM_API_KEY", "test-key")
+
+    async def failed_llm(*_args):
+        return None
+
+    monkeypatch.setattr(skill, "_call_llm", failed_llm)
+    result = await skill.execute({"message": "RAG 幻觉"})
+
+    assert result.success is True
+    assert result.data["next_question"] == "你最希望解决的具体问题是什么？"
+
+
+@pytest.mark.asyncio
+async def test_research_clarification_uses_llm_suggestion_for_unknown_answer(monkeypatch):
+    from app.core.config import settings
+    skill = ResearchClarificationSkill()
+    monkeypatch.setattr(settings, "LLM_API_KEY", "test-key")
+
+    async def llm_content(_state, _message, _next_field, needs_suggestion):
+        if not needs_suggestion:
+            return {"reply": "继续完善。", "next_question": "下一项是什么？", "options": ["A", "B", "C"]}
+        return {"reply": "建议先用公开 RAG 基准。", "next_question": "你的时间或算力限制是什么？", "options": ["一周", "两周", "一个月"], "suggested_value": "公开 RAG 基准测试集与开源模型"}
+
+    monkeypatch.setattr(skill, "_call_llm", llm_content)
+    first = await skill.execute({"message": "RAG"})
+    second = await skill.execute({"message": "减少幻觉", "session_id": first.data["session_id"]})
+    third = await skill.execute({"message": "我不知道，有什么推荐吗", "session_id": first.data["session_id"]})
+
+    assert second.data["next_field"] == "data_and_method"
+    assert third.data["state"]["data_and_method"] == "公开 RAG 基准测试集与开源模型"
+
+
+@pytest.mark.asyncio
 async def test_academic_search_invokes_all_sources_and_clamps_limit():
     captured = []
 

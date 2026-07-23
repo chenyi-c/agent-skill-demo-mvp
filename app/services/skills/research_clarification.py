@@ -1,15 +1,32 @@
 import time
 import uuid
+import json
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel, Field
+import httpx
+from pydantic import BaseModel, Field, field_validator
 
+from app.core.config import settings
 from app.services.skills.base import BaseSkill, SkillResult
 
 
 class ResearchClarificationInput(BaseModel):
     message: str = Field(..., min_length=1, description="用户本轮补充的科研需求信息")
     session_id: Optional[str] = Field(default=None, description="科研需求澄清会话 ID")
+
+
+class ClarificationLLMOutput(BaseModel):
+    reply: str = Field(min_length=1)
+    next_question: str = Field(min_length=1)
+    options: list[str]
+    suggested_value: Optional[str] = None
+
+    @field_validator("options")
+    @classmethod
+    def validate_options(cls, value: list[str]) -> list[str]:
+        if len(value) != 3 or any(not isinstance(item, str) or not item.strip() for item in value):
+            raise ValueError("options must contain exactly three non-empty strings")
+        return [item.strip() for item in value]
 
 
 class ResearchClarificationSkill(BaseSkill):
@@ -46,6 +63,38 @@ class ResearchClarificationSkill(BaseSkill):
         question, options = self._questions[field]
         return {"next_field": field, "next_question": question, "options": options}
 
+    @staticmethod
+    def _needs_recommendation(message: str) -> bool:
+        normalized = message.replace(" ", "").lower()
+        return any(token in normalized for token in ("不知道", "不清楚", "推荐", "建议", "帮我想"))
+
+    async def _call_llm(self, state: Dict[str, Optional[str]], message: str, next_field: str, needs_suggestion: bool) -> Optional[Dict[str, Any]]:
+        if not settings.LLM_API_KEY:
+            return None
+        prompt = {
+            "state": state,
+            "latest_user_message": message,
+            "next_field": next_field,
+            "needs_suggestion_for_current_field": needs_suggestion,
+            "rules": "Do not change next_field or workflow. Return JSON only: reply, next_question, options (exactly 3 strings), suggested_value (only when needs_suggestion is true).",
+        }
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{settings.LLM_BASE_URL}/chat/completions",
+                    headers={"Authorization": f"Bearer {settings.LLM_API_KEY}", "Content-Type": "application/json"},
+                    json={"model": settings.LLM_MODEL, "messages": [{"role": "system", "content": "Generate concise Chinese research clarification content. Obey the supplied workflow."}, {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}], "temperature": 0.3, "response_format": {"type": "json_object"}},
+                    timeout=8.0,
+                )
+            if response.status_code != 200:
+                return None
+            parsed = ClarificationLLMOutput.model_validate(json.loads(response.json()["choices"][0]["message"]["content"]))
+            if needs_suggestion and not parsed.suggested_value:
+                return None
+            return parsed.model_dump()
+        except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
     async def execute(self, params: Dict[str, Any]) -> SkillResult:
         start_time = time.perf_counter()
         try:
@@ -57,13 +106,22 @@ class ResearchClarificationSkill(BaseSkill):
             session_id = validated.session_id or str(uuid.uuid4())
             state = self._sessions.setdefault(session_id, self._new_state())
             current_field = self._next_field(state)
+            needs_suggestion = self._needs_recommendation(message)
             if current_field:
-                state[current_field] = message
+                if needs_suggestion:
+                    suggestion = await self._call_llm(state.copy(), message, current_field, True)
+                    state[current_field] = suggestion["suggested_value"] if suggestion else self._questions[current_field][1][0]
+                else:
+                    state[current_field] = message
 
             next_field = self._next_field(state)
             duration = (time.perf_counter() - start_time) * 1000.0
             if next_field:
                 prompt = self._reply_for(next_field)
+                generated = await self._call_llm(state.copy(), message, next_field, False)
+                if generated:
+                    prompt.update({key: generated[key] for key in ("next_question", "options")})
+                    prompt["reply"] = generated["reply"]
                 return SkillResult(
                     success=True,
                     skill_name=self.name,
@@ -71,7 +129,7 @@ class ResearchClarificationSkill(BaseSkill):
                         "session_id": session_id,
                         "completed": False,
                         "state": state.copy(),
-                        "reply": prompt["next_question"],
+                        "reply": prompt.get("reply", prompt["next_question"]),
                         "question": prompt["next_question"],
                         **prompt,
                     },
