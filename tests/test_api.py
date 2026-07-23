@@ -1,9 +1,71 @@
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 from app.main import app
 from app.core.config import settings
 from app.services.agent import orchestrator
+from app.services.registry import registry
 
 client = TestClient(app)
+
+
+def test_evaluation_cases_expose_metadata_without_prompts():
+    response = client.get("/api/evaluation/cases")
+
+    assert response.status_code == 200
+    cases = response.json()
+    assert [case["id"] for case in cases] == [
+        "calculator",
+        "summary",
+        "research_clarification",
+        "fallback",
+    ]
+    assert all("prompt" not in case for case in cases)
+    assert all("message" not in case for case in cases)
+    assert {case["expected_skill"] for case in cases} == {
+        "calculator_skill",
+        "summary_skill",
+        "research_clarification_skill",
+        "echo_skill",
+    }
+
+
+def test_evaluation_run_returns_deterministic_metrics_and_results(monkeypatch):
+    monkeypatch.setattr(settings, "LLM_API_KEY", "configured-key")
+    research_skill = registry.get("research_clarification_skill")
+    sessions_before = research_skill._sessions.copy()
+
+    response = client.post("/api/evaluation/run")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["pass_rate"] == 1.0
+    assert data["route_mode_counts"] == {"智能路由 (规则匹配)": 4}
+    assert [result["id"] for result in data["results"]] == [
+        "calculator",
+        "summary",
+        "research_clarification",
+        "fallback",
+    ]
+    assert all(result["passed"] is True for result in data["results"])
+    assert all("prompt" not in result for result in data["results"])
+    assert all("reply" not in result for result in data["results"])
+    assert research_skill._sessions == sessions_before
+
+    repeat = client.post("/api/evaluation/run")
+    assert repeat.status_code == 200
+    assert repeat.json()["results"] == data["results"]
+
+
+def test_static_page_includes_a_compact_evaluation_panel():
+    page = Path("static/index.html").read_text(encoding="utf-8")
+
+    assert 'id="evaluationPanel"' in page
+    assert 'id="runEvaluationBtn"' in page
+    assert 'id="passRate"' in page
+    assert 'id="routeModeCounts"' in page
+    assert 'id="evaluationResults"' in page
+    assert "/api/evaluation/run" in page
 
 def test_health_endpoint():
     response = client.get("/health")
