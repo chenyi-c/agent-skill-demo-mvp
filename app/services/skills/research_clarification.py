@@ -14,9 +14,11 @@ import unicodedata
 import uuid
 from typing import Any
 
+import httpx
 from pydantic import ValidationError
 
 from app.core.errors import AppError
+from app.core.config import settings
 from app.models.api import ResearchClarificationInput
 from app.models.research import (
     AcademicSource,
@@ -355,7 +357,7 @@ class ResearchClarificationSkill(BaseSkill):
         started = time.perf_counter()
         try:
             request = ResearchClarificationInput.model_validate(params)
-            return self._execute(request, started)
+            return await self._execute(request, started)
         except ValueError as exc:
             # A natural-language answer that cannot be coerced to the active
             # field is a normal conversation event, not an API failure.
@@ -364,7 +366,7 @@ class ResearchClarificationSkill(BaseSkill):
                 try:
                     row = get_session(session_id)
                     brief = _brief_from_row(row)
-                    return self._result(
+                    return await self._result(
                         started,
                         session_id,
                         ResearchSessionStatus(row["status"]),
@@ -385,7 +387,7 @@ class ResearchClarificationSkill(BaseSkill):
         except Exception as exc:
             return self._failure(started, f"科研需求会话处理失败: {exc}")
 
-    def _execute(self, request: ResearchClarificationInput, started: float) -> SkillResult:
+    async def _execute(self, request: ResearchClarificationInput, started: float) -> SkillResult:
         message = unicodedata.normalize("NFKC", request.message).strip()
         action = request.action
         session_id = request.session_id
@@ -408,7 +410,7 @@ class ResearchClarificationSkill(BaseSkill):
             session_id = str(uuid.uuid4())
             brief = ResearchBrief.model_validate(_extract_fields(message))
             row = create_session(session_id, brief.model_dump(mode="json"))
-            return self._persist_and_result(
+            return await self._persist_and_result(
                 started, row, brief, list(_extract_fields(message)), []
             )
 
@@ -420,7 +422,7 @@ class ResearchClarificationSkill(BaseSkill):
             ResearchSessionStatus.completed,
             ResearchSessionStatus.expired,
         }:
-            return self._result(
+            return await self._result(
                 started,
                 session_id,
                 status,
@@ -436,14 +438,14 @@ class ResearchClarificationSkill(BaseSkill):
                 current_field=None,
                 expected_version=int(row["version"]),
             )
-            return self._result(
+            return await self._result(
                 started, session_id, ResearchSessionStatus.cancelled, brief, [], []
             )
 
         if action == "confirm":
             missing = _blocking_missing(brief)
             if missing:
-                return self._result(
+                return await self._result(
                     started,
                     session_id,
                     ResearchSessionStatus.collecting,
@@ -462,7 +464,7 @@ class ResearchClarificationSkill(BaseSkill):
                 current_field=None,
                 expected_version=int(row["version"]),
             )
-            return self._result(
+            return await self._result(
                 started, session_id, ResearchSessionStatus.ready, brief, [], []
             )
 
@@ -489,7 +491,7 @@ class ResearchClarificationSkill(BaseSkill):
             brief = ResearchBrief.model_validate(merged)
             updated_fields = list(extracted)
 
-        return self._persist_and_result(started, row, brief, updated_fields, [])
+        return await self._persist_and_result(started, row, brief, updated_fields, [])
 
     @staticmethod
     def _skip_value(field: str) -> Any:
@@ -508,7 +510,7 @@ class ResearchClarificationSkill(BaseSkill):
             raise ValueError("研究主题不能跳过")
         return mapping.get(field, "未指定")
 
-    def _persist_and_result(
+    async def _persist_and_result(
         self,
         started: float,
         row: dict[str, Any],
@@ -530,7 +532,7 @@ class ResearchClarificationSkill(BaseSkill):
             current_field=current_field,
             expected_version=int(row["version"]),
         )
-        return self._result(
+        return await self._result(
             started,
             row["session_id"],
             status,
@@ -539,7 +541,7 @@ class ResearchClarificationSkill(BaseSkill):
             warnings,
         )
 
-    def _result(
+    async def _result(
         self,
         started: float,
         session_id: str,
@@ -550,6 +552,8 @@ class ResearchClarificationSkill(BaseSkill):
     ) -> SkillResult:
         missing = _blocking_missing(brief)
         question = _QUESTIONS[missing[0]] if status == ResearchSessionStatus.collecting and missing else None
+        if question:
+            question = ClarificationQuestion.model_validate(await self._llm_question(brief, question))
         can_search = not missing and status in {
             ResearchSessionStatus.awaiting_confirmation,
             ResearchSessionStatus.ready,
@@ -572,6 +576,25 @@ class ResearchClarificationSkill(BaseSkill):
             data=output.model_dump(mode="json"),
             duration_ms=(time.perf_counter() - started) * 1000,
         )
+
+    async def _llm_question(self, brief: ResearchBrief, question: ClarificationQuestion) -> dict[str, Any]:
+        """Let the model personalise wording only; workflow field stays server-controlled."""
+        if not settings.LLM_API_KEY:
+            return question.model_dump(mode="json")
+        payload = {"brief": brief.model_dump(mode="json"), "field": question.field, "fallback": question.model_dump(mode="json"), "rules": "Return JSON only. Keep field exactly unchanged. Return exactly 3 options. Do not fill or alter research state."}
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                response = await client.post(f"{str(settings.LLM_BASE_URL).rstrip('/')}/chat/completions", headers={"Authorization": f"Bearer {settings.LLM_API_KEY}"}, json={"model": settings.LLM_MODEL, "messages": [{"role": "system", "content": "Generate one concise Chinese research clarification question."}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], "temperature": 0.3, "response_format": {"type": "json_object"}})
+                response.raise_for_status()
+            data = json.loads(response.json()["choices"][0]["message"]["content"])
+            data["field"] = question.field
+            data["allow_free_text"] = True
+            data["allow_skip"] = question.allow_skip
+            if not isinstance(data.get("options"), list) or len(data["options"]) != 3:
+                raise ValueError("invalid options")
+            return ClarificationQuestion.model_validate(data).model_dump(mode="json")
+        except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError):
+            return question.model_dump(mode="json")
 
     def _failure(self, started: float, error: str) -> SkillResult:
         return SkillResult(
