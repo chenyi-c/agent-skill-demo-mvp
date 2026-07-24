@@ -11,6 +11,13 @@ from app.services.registry import SkillRegistry
 from app.services.skills.research_clarification import ResearchClarificationSkill
 from app.services.skills.academic_search import AcademicSearchSkill
 
+
+@pytest.fixture(autouse=True)
+def disable_real_llm_calls(monkeypatch):
+    """Skill tests must never depend on a locally saved API key or network."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "LLM_API_KEY", None)
+
 def test_skill_registry():
     registry = SkillRegistry()
     echo = EchoSkill()
@@ -105,6 +112,18 @@ async def test_research_clarification_first_message_extracts_topic():
 
     # Should have a question for the next missing field
     assert first.data["question"] is not None
+
+
+@pytest.mark.asyncio
+async def test_research_clarification_uses_llm_question_when_configured(monkeypatch):
+    from app.core.config import settings
+    skill = ResearchClarificationSkill()
+    monkeypatch.setattr(settings, "LLM_API_KEY", "test-key")
+    def generated_question(_brief, _question):
+        return {"field": "objective", "text": "针对 RAG，你最想先降低哪类幻觉？", "reason": "便于限定检索范围", "options": [{"label": "引用错误", "value": "减少引用错误"}, {"label": "检索错误", "value": "减少检索错误"}, {"label": "自己描述", "value": "__free__"}], "allow_free_text": True, "allow_skip": True}
+    monkeypatch.setattr(skill, "_llm_question", generated_question)
+    result = await skill.execute({"message": "我想研究 RAG"})
+    assert result.data["question"]["text"] == "针对 RAG，你最想先降低哪类幻觉？"
 
 
 @pytest.mark.asyncio

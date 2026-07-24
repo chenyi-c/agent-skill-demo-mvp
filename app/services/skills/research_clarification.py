@@ -14,9 +14,11 @@ import unicodedata
 import uuid
 from typing import Any
 
+import httpx
 from pydantic import ValidationError
 
 from app.core.errors import AppError
+from app.core.config import settings
 from app.models.api import ResearchClarificationInput
 from app.models.research import (
     AcademicSource,
@@ -550,6 +552,8 @@ class ResearchClarificationSkill(BaseSkill):
     ) -> SkillResult:
         missing = _blocking_missing(brief)
         question = _QUESTIONS[missing[0]] if status == ResearchSessionStatus.collecting and missing else None
+        if question:
+            question = ClarificationQuestion.model_validate(self._llm_question(brief, question))
         can_search = not missing and status in {
             ResearchSessionStatus.awaiting_confirmation,
             ResearchSessionStatus.ready,
@@ -572,6 +576,25 @@ class ResearchClarificationSkill(BaseSkill):
             data=output.model_dump(mode="json"),
             duration_ms=(time.perf_counter() - started) * 1000,
         )
+
+    def _llm_question(self, brief: ResearchBrief, question: ClarificationQuestion) -> dict[str, Any]:
+        """Let the model personalise wording only; workflow field stays server-controlled."""
+        if not settings.LLM_API_KEY:
+            return question.model_dump(mode="json")
+        payload = {"brief": brief.model_dump(mode="json"), "field": question.field, "fallback": question.model_dump(mode="json"), "rules": "Return JSON only. Keep field exactly unchanged. Return exactly 3 options. Do not fill or alter research state."}
+        try:
+            with httpx.Client(timeout=8.0) as client:
+                response = client.post(f"{str(settings.LLM_BASE_URL).rstrip('/')}/chat/completions", headers={"Authorization": f"Bearer {settings.LLM_API_KEY}"}, json={"model": settings.LLM_MODEL, "messages": [{"role": "system", "content": "Generate one concise Chinese research clarification question."}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], "temperature": 0.3, "response_format": {"type": "json_object"}})
+                response.raise_for_status()
+            data = json.loads(response.json()["choices"][0]["message"]["content"])
+            data["field"] = question.field
+            data["allow_free_text"] = True
+            data["allow_skip"] = question.allow_skip
+            if not isinstance(data.get("options"), list) or len(data["options"]) != 3:
+                raise ValueError("invalid options")
+            return ClarificationQuestion.model_validate(data).model_dump(mode="json")
+        except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError):
+            return question.model_dump(mode="json")
 
     def _failure(self, started: float, error: str) -> SkillResult:
         return SkillResult(
