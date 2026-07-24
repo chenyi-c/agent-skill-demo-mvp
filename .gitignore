@@ -18,6 +18,9 @@ env/
 .pytest_cache/
 *.log
 .agents/
+data/*.db
+data/*.db-shm
+data/*.db-wal
 
 # Local agent workspaces and temporary render artifacts
 .worktrees/
@@ -39,3 +42,4 @@ docs/*
 !docs/superpowers/specs/*.md
 !docs/superpowers/plans/
 !docs/superpowers/plans/*.md
+!docs/SKILL_DEVELOPMENT_STANDARD.md

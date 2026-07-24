@@ -1,238 +1,447 @@
-import time
-import re
+"""Agent routing and bounded Skill orchestration."""
+
+from __future__ import annotations
+
 import json
+import re
+import time
+from typing import Any, Optional
+
 import httpx
-from typing import Dict, Any, Tuple, Optional
-from pydantic import BaseModel
+from pydantic import ValidationError
+
 from app.core.config import settings
+from app.services.query_extractor import extract_query
 from app.services.registry import registry
 from app.services.skills.base import SkillResult
 
+
+def _research_action(message: str, explicit: str | None) -> str:
+    if explicit in {"answer", "update", "skip", "confirm", "cancel", "restart"}:
+        return explicit
+    cleaned = message.strip().lower()
+    if re.search(r"重新开始|重置|restart", cleaned):
+        return "restart"
+    if re.search(r"取消(?:会话|研究)?|退出(?:会话|研究)?|cancel", cleaned):
+        return "cancel"
+    if re.search(r"确认.*(?:检索|搜索)|开始(?:检索|搜索)|就按这个搜", cleaned):
+        return "confirm"
+    return "answer"
+
+
+def _format_research(data: dict[str, Any]) -> str:
+    status = data.get("status")
+    brief = data.get("brief") or {}
+    labels = {
+        "topic": "主题",
+        "objective": "目标",
+        "core_question": "核心问题",
+        "research_object": "研究对象",
+        "data_or_materials": "数据/材料",
+        "method_preferences": "方法偏好",
+        "time_range": "年份",
+        "languages": "语言",
+        "source_preferences": "来源",
+        "exclusions": "排除项",
+        "constraints": "约束",
+        "expected_output": "输出",
+    }
+    if status == "cancelled":
+        return "科研需求会话已取消。需要时可以重新开始。"
+    if status == "completed":
+        return "本轮需求确认和检索已经完成。"
+
+    lines: list[str] = []
+    visible: list[str] = []
+    for field in data.get("filled_fields", []):
+        value = brief.get(field)
+        if isinstance(value, dict):
+            if value.get("unlimited"):
+                value = "不限"
+            else:
+                value = f"{value.get('start') or ''}–{value.get('end') or ''}".strip("–")
+        elif isinstance(value, list):
+            value = "、".join(str(v) for v in value)
+        if value:
+            visible.append(f"{labels.get(field, field)}：{value}")
+    if visible:
+        lines.append("已确认：" + "；".join(visible) + "。")
+
+    question = data.get("question")
+    if question:
+        lines.append(f"\n{question.get('text', '')}")
+        if question.get("reason"):
+            lines.append(f"原因：{question['reason']}")
+        for index, option in enumerate(question.get("options", []), 1):
+            lines.append(f"{index}. {option.get('label', option.get('value', ''))}")
+
+    if status == "awaiting_confirmation":
+        plan = data.get("search_plan") or {}
+        lines.append("\n需求已经达到可检索条件，请检查下面的检索计划。")
+        lines.append(
+            "关键词："
+            + "、".join(plan.get("keywords") or [plan.get("query", "")])
+            + "\n来源："
+            + "、".join(plan.get("sources") or [])
+        )
+        lines.append("确认无误后点击“确认并开始检索”，也可以继续补充或修改。")
+    elif status == "ready":
+        lines.append("需求已经确认，准备开始受约束学术检索。")
+
+    for warning in data.get("warnings", []):
+        lines.append(f"提示：{warning.get('message', '')}")
+    return "\n".join(lines) or "请继续补充科研需求。"
+
+
+def _format_academic(data: dict[str, Any]) -> str:
+    papers = data.get("results") or []
+    statuses = data.get("source_statuses") or []
+    overall = data.get("overall_status", "error")
+    status_text = []
+    for item in sorted(statuses, key=lambda value: value.get("source", "")):
+        source = item.get("source", "unknown")
+        state = item.get("status", "error")
+        count = item.get("result_count", 0)
+        if state in {"ok", "cache_hit", "stale_cache"}:
+            status_text.append(f"{source}: {count} 篇 ({state})")
+        elif state == "empty":
+            status_text.append(f"{source}: 无结果")
+        else:
+            status_text.append(f"{source}: {state}")
+
+    if not papers:
+        prefix = "所有学术来源均不可用。" if overall == "error" else "没有找到匹配论文。"
+        return prefix + ("\n来源状态：" + " | ".join(status_text) if status_text else "")
+
+    lines = [
+        f"找到 {len(papers)} 篇去重后的候选论文"
+        + ("（部分来源失败）" if overall == "degraded" else "")
+        + "。",
+        "来源状态：" + " | ".join(status_text),
+        "",
+    ]
+    for index, paper in enumerate(papers, 1):
+        title = paper.get("title") or "无标题"
+        year = paper.get("year")
+        authors = paper.get("authors") or []
+        lines.append(f"**{index}. {title}**" + (f" ({year})" if year else ""))
+        if authors:
+            lines.append("   " + "；".join(authors[:3]) + (" 等" if len(authors) > 3 else ""))
+        meta = []
+        if paper.get("venue"):
+            meta.append(str(paper["venue"]))
+        if paper.get("doi"):
+            meta.append("DOI: " + str(paper["doi"]))
+        if paper.get("is_preprint"):
+            meta.append("预印本")
+        if meta:
+            lines.append("   " + " | ".join(meta))
+        lines.append("")
+    return "\n".join(lines)
+
+
 class AgentOrchestrator:
-    def __init__(self):
-        pass
-
-    def _rule_route(self, user_input: str, session_id: Optional[str] = None) -> Tuple[str, Dict[str, Any], str]:
-        """
-        Rule-based router based on keyword and input analysis.
-        Returns: (skill_name, arguments_dict, reason)
-        """
+    def _rule_route(
+        self, user_input: str
+    ) -> tuple[str, dict[str, Any], str]:
         cleaned = user_input.strip()
+        compact = re.sub(r"\s+", "", cleaned)
 
-        # 1. Check for math formulas (simple calculator heuristic)
-        math_chars_only = re.sub(r'\s+', '', cleaned)
-        if re.match(r'^[0-9.+\-*/()]+$', math_chars_only) and len(math_chars_only) > 1:
-            return "calculator_skill", {"expression": cleaned}, "基于规则：检测到纯数学表达式字符。"
-        
-        # Check for keywords
-        math_keywords = ["calculate", "calc", "等于", "计算", "+", "-", "*", "/"]
-        if any(kw in cleaned.lower() for kw in math_keywords) and re.search(r'\d', cleaned):
-            formula_match = re.search(r'[0-9.+\-*/() ]{3,}', cleaned)
-            formula = formula_match.group(0).strip() if formula_match else cleaned
-            return "calculator_skill", {"expression": formula}, "基于规则：检测到数学关键字与数字。"
+        # Calculator only wins when the complete input is a parseable-looking formula.
+        if (
+            re.fullmatch(r"[0-9.+\-*/()]+", compact)
+            and re.search(r"[+\-*/]", compact)
+            and len(re.findall(r"\d+(?:\.\d+)?", compact)) >= 2
+        ):
+            return "calculator_skill", {"expression": cleaned}, "基于规则：完整输入是数学表达式。"
 
-        # 2. Check for summary keywords
-        summary_keywords = ["summarize", "summary", "总结", "大纲", "概述", "摘要", "提炼"]
-        if any(kw in cleaned.lower() for kw in summary_keywords):
-            payload = cleaned
-            for kw in summary_keywords:
-                payload = re.sub(rf'(?i)\b{kw}\b|{kw}', '', payload)
-            payload = payload.strip(":： \n")
-            if len(payload) < 5:
-                payload = cleaned
-            return "summary_skill", {"text": payload, "max_sentences": 3}, "基于规则：检测到文本总结关键字。"
+        if any(word in cleaned.lower() for word in ("summarize", "summary", "总结", "概述", "摘要", "提炼")):
+            payload = re.sub(r"^(?:请)?(?:总结|概述|摘要|提炼)\s*[:：]?\s*", "", cleaned)
+            return "summary_skill", {"text": payload or cleaned, "max_sentences": 3}, "检测到摘要需求。"
 
-        literature_keywords = ["论文", "文献", "检索", "paper", "literature"]
-        if any(keyword in cleaned.lower() for keyword in literature_keywords):
-            return "academic_search_skill", {"query": cleaned}, "基于规则：检测到学术文献检索需求。"
+        if any(word in cleaned.lower() for word in ("论文", "文献", "检索", "paper", "literature")):
+            query = extract_query(cleaned)
+            if query.needs_clarification:
+                return (
+                    "research_clarification_skill",
+                    {"message": cleaned},
+                    "检索主题不够明确，先进入需求确认。",
+                )
+            return (
+                "academic_search_skill",
+                {"query": query.normalized_query, "keywords": query.keywords},
+                "检测到明确的学术文献检索需求。",
+            )
 
-        research_keywords = ["研究", "课题", "方向", "科研", "rag"]
-        if session_id or any(keyword in cleaned.lower() for keyword in research_keywords):
-            return "research_clarification_skill", {"message": cleaned, "session_id": session_id}, "基于规则：检测到科研需求确认。"
+        if any(word in cleaned.lower() for word in ("研究", "课题", "科研", "方向", "rag", "agent")):
+            return "research_clarification_skill", {"message": cleaned}, "检测到科研需求，需要逐步澄清。"
 
-        # 3. Default fallback: EchoSkill
-        return "echo_skill", {"text": cleaned}, "基于规则：默认缺省分发 (Echo)。"
+        return "echo_skill", {"text": cleaned}, "没有高置信度专业意图，使用基础通道。"
 
-    async def _llm_route(self, user_input: str) -> Optional[Tuple[str, Dict[str, Any], str]]:
-        """
-        Model-based router using LLM JSON output to select the skill.
-        Returns: (skill_name, arguments_dict, reason) or None if fails.
-        """
+    async def _llm_route(
+        self, user_input: str
+    ) -> tuple[str, dict[str, Any], str] | None:
         if not settings.LLM_API_KEY:
             return None
-
-        # Build list of active skills description
-        skills_info = []
-        for skill in registry.list_skills(include_disabled=False):
-            param_fields = skill.input_schema.model_fields
-            params_desc = {
-                name: {
-                    "type": str(field.annotation), 
-                    "description": field.description or "No description"
-                }
-                for name, field in param_fields.items()
-            }
-            skills_info.append({
+        skills = [
+            {
                 "name": skill.name,
-                "display_name": skill.display_name,
                 "description": skill.description,
-                "parameters_schema": params_desc
-            })
-
-        system_prompt = (
-            "You are the Router core of an AI Agent system. Your job is to select the single best Skill "
-            "to answer the user's prompt, extract its parameters, and provide your reasoning.\n\n"
-            f"Available Skills:\n{json.dumps(skills_info, indent=2)}\n\n"
-            "You MUST respond ONLY with a raw JSON object (do not wrap in markdown ```json or block code) containing:\n"
-            "{\n"
-            '  "skill_name": "the selected skill name",\n'
-            '  "arguments": { "argument_name": "extracted_value" },\n'
-            '  "reason": "short explanation of why you selected this skill in Chinese"\n'
-            "}\n"
-            "If no skill is highly relevant, select 'echo_skill'. Keep arguments matches exact types."
+                "schema": skill.input_schema.model_json_schema(),
+            }
+            for skill in registry.list_skills()
+        ]
+        system = (
+            "选择一个最合适的 Skill，并只返回 JSON："
+            '{"skill_name":"...", "arguments":{}, "reason":"简短中文原因"}。'
+            "用户需求模糊时优先 research_clarification_skill；不要把整句口语当论文 query。\n"
+            + json.dumps(skills, ensure_ascii=False)
         )
-
-        headers = {
-            "Authorization": f"Bearer {settings.LLM_API_KEY}",
-            "Content-Type": "application/json"
-        }
         payload = {
             "model": settings.LLM_MODEL,
             "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_input}
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_input},
             ],
-            "temperature": 0.0,
-            "response_format": {"type": "json_object"}
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
         }
-
+        url = f"{str(settings.LLM_BASE_URL).rstrip('/')}/chat/completions"
         try:
-            url = f"{settings.LLM_BASE_URL}/chat/completions"
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, json=payload, headers=headers, timeout=8.0)
-                if response.status_code != 200:
-                    return None
-                
-                data = response.json()
-                content = data["choices"][0]["message"]["content"].strip()
-                
-                route_decision = json.loads(content)
-                skill_name = route_decision.get("skill_name")
-                arguments = route_decision.get("arguments", {})
-                reason = route_decision.get("reason", "模型自主路由。")
-                
-                skill = registry.get(skill_name)
-                if not skill or not skill.enabled:
-                    return None
-                
-                skill.input_schema(**arguments)
-                return skill_name, arguments, f"模型决策: {reason}"
-        except Exception as e:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                response = await client.post(
+                    url,
+                    json=payload,
+                    headers={"Authorization": f"Bearer {settings.LLM_API_KEY}"},
+                )
+                if response.status_code == 400:
+                    payload.pop("response_format", None)
+                    response = await client.post(
+                        url,
+                        json=payload,
+                        headers={"Authorization": f"Bearer {settings.LLM_API_KEY}"},
+                    )
+                response.raise_for_status()
+            decision = json.loads(response.json()["choices"][0]["message"]["content"])
+            skill = registry.get(decision.get("skill_name"))
+            if not skill or not skill.enabled:
+                return None
+            validated = skill.input_schema.model_validate(decision.get("arguments") or {})
+            return skill.name, validated.model_dump(mode="json"), str(decision.get("reason") or "模型路由")
+        except Exception:
             return None
 
-    async def execute_task(self, user_input: str, preferred_skill: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Coordinates the entire flow.
-        """
-        start_time = time.perf_counter()
-        
-        skill_name = None
-        arguments = {}
-        route_reason = ""
-        route_mode = "智能路由 (LLM)"
-        
-        # 1. Routing phase
+    async def execute_task(
+        self,
+        user_input: str,
+        preferred_skill: Optional[str] = None,
+        session_id: Optional[str] = None,
+        action: Optional[str] = None,
+        target_field: Optional[str] = None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        cleaned = user_input.strip()
+
+        if session_id and _research_action(cleaned, action) == "confirm" and not preferred_skill:
+            return await self._confirm_and_search(session_id, cleaned, started)
+
         if preferred_skill:
             skill_name = preferred_skill
-            route_mode = "手动指定"
-            route_reason = f"用户手动指定强制运行 Skill: '{preferred_skill}'。"
-            if skill_name == "calculator_skill":
-                formula_match = re.search(r'[0-9.+\-*/() ]{3,}', user_input)
-                formula = formula_match.group(0).strip() if formula_match else user_input
-                arguments = {"expression": formula}
-            elif skill_name == "summary_skill":
-                arguments = {"text": user_input, "max_sentences": 3}
-            elif skill_name == "research_clarification_skill":
-                arguments = {"message": user_input, "session_id": session_id}
-            elif skill_name == "academic_search_skill":
-                arguments = {"query": user_input}
-            else:
-                arguments = {"text": user_input}
+            route_mode = "manual"
+            reason = f"用户手动指定 {preferred_skill}。"
+            arguments = self._manual_arguments(
+                preferred_skill, cleaned, session_id, action, target_field
+            )
+        elif (
+            session_id
+            and not re.fullmatch(r"\d{4}\s*[-–—至到]\s*\d{4}", cleaned)
+            and self._rule_route(cleaned)[0] == "calculator_skill"
+        ):
+            skill_name, arguments, reason = self._rule_route(cleaned)
+            route_mode = "rule"
+        elif session_id:
+            # An active workflow owns normal replies. This prevents dates such as
+            # "2021-2026" from being mistaken for a calculator expression.
+            skill_name = "research_clarification_skill"
+            route_mode = "workflow"
+            reason = "继续当前科研需求确认会话。"
+            arguments = {
+                "message": cleaned,
+                "session_id": session_id,
+                "action": _research_action(cleaned, action),
+                "target_field": target_field,
+            }
         else:
-            decision = None
-            if session_id:
-                skill_name, arguments, route_reason = self._rule_route(user_input, session_id)
-                route_mode = "智能路由 (科研会话恢复)"
+            decision = await self._llm_route(cleaned)
+            if decision:
+                skill_name, arguments, reason = decision
+                route_mode = "llm"
             else:
-                if settings.LLM_API_KEY:
-                    decision = await self._llm_route(user_input)
+                skill_name, arguments, reason = self._rule_route(cleaned)
+                route_mode = "rule_fallback" if settings.LLM_API_KEY else "rule"
 
-                if decision:
-                    skill_name, arguments, route_reason = decision
-                else:
-                    skill_name, arguments, route_reason = self._rule_route(user_input, session_id)
-                    route_mode = "智能路由 (规则降级 - 开启LLM)" if settings.LLM_API_KEY else "智能路由 (规则匹配)"
+        return await self._run(
+            skill_name, arguments, route_mode, reason, started
+        )
 
-        # 2. Validation & Execution phase
+    def _manual_arguments(
+        self,
+        skill_name: str,
+        message: str,
+        session_id: str | None,
+        action: str | None,
+        target_field: str | None,
+    ) -> dict[str, Any]:
+        if skill_name == "research_clarification_skill":
+            return {
+                "message": message,
+                "session_id": session_id,
+                "action": _research_action(message, action),
+                "target_field": target_field,
+            }
+        if skill_name == "academic_search_skill":
+            query = extract_query(message)
+            return {
+                "query": query.normalized_query or message,
+                "keywords": query.keywords,
+            }
+        if skill_name == "calculator_skill":
+            return {"expression": message}
+        if skill_name == "summary_skill":
+            return {"text": message, "max_sentences": 3}
+        return {"text": message}
+
+    async def _run(
+        self,
+        skill_name: str,
+        arguments: dict[str, Any],
+        route_mode: str,
+        reason: str,
+        started: float,
+    ) -> dict[str, Any]:
         skill = registry.get(skill_name)
         if not skill:
-            duration = (time.perf_counter() - start_time) * 1000.0
-            return {
-                "success": False,
-                "reply": f"系统错误: 未找到或已禁用 Skill '{skill_name}'。",
-                "route_mode": route_mode,
-                "skill_name": skill_name,
-                "reason": route_reason,
-                "inputs": arguments,
-                "outputs": None,
-                "duration_ms": duration,
-                "error": f"Skill '{skill_name}' not found."
-            }
-
+            return self._error_result(
+                started,
+                skill_name,
+                route_mode,
+                reason,
+                arguments,
+                f"未找到或已禁用 Skill '{skill_name}'。",
+            )
+        if not skill.enabled:
+            return self._error_result(
+                started, skill_name, route_mode, reason, arguments, "Skill 已禁用。"
+            )
         try:
-            skill.input_schema(**arguments)
-        except Exception as ve:
-            duration = (time.perf_counter() - start_time) * 1000.0
-            return {
-                "success": False,
-                "reply": f"参数校验异常 (Skill '{skill_name}'): {str(ve)}",
-                "route_mode": route_mode,
-                "skill_name": skill_name,
-                "reason": route_reason,
-                "inputs": arguments,
-                "outputs": None,
-                "duration_ms": duration,
-                "error": f"Input validation failed: {str(ve)}"
-            }
-
-        # Execute
-        result: SkillResult = await skill.execute(arguments)
-        duration = (time.perf_counter() - start_time) * 1000.0
-        
-        reply = ""
-        if result.success:
-            if skill_name == "calculator_skill":
-                reply = f"计算结果: {result.data.get('formatted')}"
-            elif skill_name == "summary_skill":
-                reply = f"智能摘要提炼:\n{result.data.get('summary')}"
-            elif skill_name == "academic_search_skill":
-                reply = f"已从受限学术源返回 {len(result.data.get('results', []))} 条结果。"
-            else:
-                reply = result.data.get("reply", str(result.data))
-        else:
-            reply = f"Skill 执行异常: {result.error}"
-
+            validated = skill.input_schema.model_validate(arguments)
+            clean_arguments = validated.model_dump(mode="json")
+        except ValidationError as exc:
+            return self._error_result(
+                started, skill_name, route_mode, reason, arguments, f"参数校验失败: {exc}"
+            )
+        try:
+            result: SkillResult = await skill.execute(clean_arguments)
+        except Exception as exc:
+            return self._error_result(
+                started, skill_name, route_mode, reason, clean_arguments, f"Skill 执行失败: {exc}"
+            )
+        reply = self._format_result(skill_name, result)
         return {
             "success": result.success,
             "reply": reply,
             "route_mode": route_mode,
             "skill_name": skill_name,
-            "reason": route_reason,
-            "inputs": arguments,
+            "reason": reason,
+            "inputs": clean_arguments,
             "outputs": result.data,
-            "duration_ms": duration,
-            "error": result.error
+            "duration_ms": (time.perf_counter() - started) * 1000,
+            "error": result.error,
         }
 
-# Global Orchestrator instance
+    async def _confirm_and_search(
+        self, session_id: str, message: str, started: float
+    ) -> dict[str, Any]:
+        confirmation = await self._run(
+            "research_clarification_skill",
+            {"message": message, "session_id": session_id, "action": "confirm"},
+            "workflow",
+            "用户确认研究简报并开始受约束检索。",
+            started,
+        )
+        outputs = confirmation.get("outputs") or {}
+        if not confirmation["success"] or outputs.get("status") != "ready":
+            return confirmation
+
+        plan = outputs["search_plan"]
+        search_arguments = {
+            "query": plan["query"],
+            "keywords": plan.get("keywords", []),
+            "sources": plan.get("sources", []),
+            "year_from": plan.get("year_from"),
+            "year_to": plan.get("year_to"),
+            "total_limit": plan.get("total_limit", 12),
+        }
+        result = await self._run(
+            "academic_search_skill",
+            search_arguments,
+            "workflow",
+            "研究简报已确认，执行来源白名单检索。",
+            started,
+        )
+        if result["success"]:
+            from app.services.skills.research_clarification import mark_session_completed
+
+            mark_session_completed(session_id)
+            result_outputs = result.get("outputs") or {}
+            result_outputs.update(
+                {
+                    "session_id": session_id,
+                    "status": "completed",
+                    "research_brief": outputs.get("brief"),
+                    "search_plan": plan,
+                }
+            )
+            result["outputs"] = result_outputs
+        else:
+            result["error"] = result.get("error") or "检索失败，可保留当前会话后重试。"
+        return result
+
+    @staticmethod
+    def _format_result(skill_name: str, result: SkillResult) -> str:
+        if skill_name == "academic_search_skill" and result.data:
+            return _format_academic(result.data)
+        if not result.success:
+            return f"执行失败：{result.error}"
+        data = result.data or {}
+        if skill_name == "research_clarification_skill":
+            return _format_research(data)
+        if skill_name == "calculator_skill":
+            return f"计算结果：{data.get('formatted')}"
+        if skill_name == "summary_skill":
+            return f"摘要：\n{data.get('summary')}"
+        return str(data.get("reply", data))
+
+    @staticmethod
+    def _error_result(
+        started: float,
+        skill_name: str,
+        route_mode: str,
+        reason: str,
+        inputs: dict[str, Any],
+        error: str,
+    ) -> dict[str, Any]:
+        return {
+            "success": False,
+            "reply": error,
+            "route_mode": route_mode,
+            "skill_name": skill_name,
+            "reason": reason,
+            "inputs": inputs,
+            "outputs": None,
+            "duration_ms": (time.perf_counter() - started) * 1000,
+            "error": error,
+        }
+
+
 orchestrator = AgentOrchestrator()

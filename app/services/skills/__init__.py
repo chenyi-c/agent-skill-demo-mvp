@@ -1,19 +1,3 @@
-from app.services.skills.echo import EchoSkill
-from app.services.skills.calculator import CalculatorSkill
-from app.services.skills.summary import TextSummarySkill
-from app.services.skills.research_clarification import ResearchClarificationSkill
-from app.services.skills.academic_search import AcademicSearchSkill
-from app.services.registry import registry
-
-# Instantiate and register the skills
-echo_skill = EchoSkill()
-calc_skill = CalculatorSkill()
-summary_skill = TextSummarySkill()
-research_clarification_skill = ResearchClarificationSkill()
-academic_search_skill = AcademicSearchSkill()
-
-registry.register(echo_skill)
-registry.register(calc_skill)
-registry.register(summary_skill)
-registry.register(research_clarification_skill)
-registry.register(academic_search_skill)
+# Skills package — individual skill modules are auto-discovered and registered
+# via app.services.discovery during FastAPI lifespan.
+# DO NOT instantiate or register skills here (Section 12.2).
