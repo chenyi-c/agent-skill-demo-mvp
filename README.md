@@ -1,164 +1,113 @@
-# 智教码航 - 智能体 Skill 调用与评测演示平台 (Web Demo MVP)
+# 智教码航 Code Navi — 科研辅助 Skill MVP
 
-本项目是“智教码航 (Code Navi)”数智化人才培养平台的科研/助研端核心技术演示原型（MVP）。
+这是一个 FastAPI + 原生 HTML/JS + Pydantic 的 AI Agent Skill 演示平台。本期核心闭环是：
 
-项目的核心目标是**验证 AI Agent 在对话中进行“意图智能路由分发”并“安全调用自定义技能 (Skills)”的闭环能力**。它为导师和评审专家直观展示了 AI 如何从传统的“满嘴跑火车（学术幻觉）”转变为“基于严谨工具与权威数据源执行任务”的智能体。
+1. 用户用自然语言提出粗略科研需求；
+2. `research_clarification_skill` 连续追问并生成结构化 Research Brief；
+3. 用户确认 Search Plan；
+4. `academic_search_skill` 只在 arXiv、Semantic Scholar、OpenAlex、Crossref 四个白名单来源中检索；
+5. 页面显示论文卡片、各来源状态和执行轨迹。
 
----
+没有配置 LLM API Key 时，系统仍可通过确定性规则完成需求确认和 Query 提取，不会把整句聊天原样当检索词。
 
-## 🌟 核心设计亮点
+## 环境要求与启动
 
-1.  **AI 原生对话入口**：学生无需在死板的菜单表单中跳转，只需在聊天框输入自然语言需求，Agent 自动分发任务。
-2.  **前后端与业务解耦**：前端（原生极简网页）、API 接口层（FastAPI）、Agent 决策路由层、Skill 业务实现层完全物理隔离，便于多人协同开发与后期客户端复用。
-3.  **双模路由与规则降级**：
-    *   **大模型智能路由**：配置 API 后，使用 LLM 自主读取技能描述并输出 JSON 决策。
-    *   **规则匹配降级**：无网络或未配置 Key 时，自动降级为本地高吞吐的规则解析器，**确保演示现场 100% 稳定，不崩溃**。
-4.  **安全计算沙箱**：计算器技能手写了逆波兰（RPN）表达式解析器，彻底封杀危险的 `eval()` 执行，防范远程命令执行（RCE）风险。
+- Windows
+- Python 3.11+
+- 可选：Node.js（只用于检查前端 JavaScript 语法）
+- 可选：`paper-search-mcp` CLI（只影响真实学术检索）
 
----
-
-## 📦 快速开始与环境安装
-
-### 1. 运行环境要求
-*   **Python 3.11 或以上版本**。
-*   建议在项目根目录下安装依赖。
-
-### 2. 安装依赖包
-在项目根目录运行以下命令安装运行与测试所需的依赖：
-```bash
-pip install -r requirements.txt
-pip install pytest-asyncio
-```
-
-### 3. 一键启动服务
-在终端内运行以下命令启动本地 Web 服务器：
-```bash
+```powershell
+cd D:\agent-skill-demo-mvp
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 python run.py
 ```
-当看到终端显示 `Uvicorn running on http://127.0.0.1:8000` 时，即表明服务启动成功。
 
-### 4. 访问系统
-*   **演示网页端（推荐）**：[http://localhost:8000/](http://localhost:8000/) （使用浏览器直接打开）
-*   **API 交互式文档 (Swagger UI)**：[http://localhost:8000/docs](http://localhost:8000/docs)
-*   **健康检查接口**：[http://localhost:8000/health](http://localhost:8000/health)
+访问：
 
----
+- Web：`http://127.0.0.1:8000/`
+- Swagger：`http://127.0.0.1:8000/docs`
+- 存活检查：`http://127.0.0.1:8000/api/v1/health/live`
+- 就绪检查：`http://127.0.0.1:8000/api/v1/health/ready`
 
-## 🔑 大模型 API 配置指南（如何在网页端填入 API）
+所有运行数据均在项目的 `data/code_navi_mvp.db`，不会主动在 C 盘创建项目文件。
 
-本平台完美兼容 OpenAI API 规范。你可以直接在网页左侧的**【大模型 API 配置】**面板中填入你所购买或申请的 API 服务。
+## 核心 Skill
 
-### 推荐配置一：DeepSeek 官方 API（性价比最高，国内直连）
-*   **接口秘钥 (API Key)**：粘贴你在 DeepSeek 开放平台申请到的密钥（以 `sk-` 开头）。
-*   **接口基础路径 (Base URL)**：`https://api.deepseek.com/v1`
-*   **模型名称 (Model)**：`deepseek-chat`
+| Skill | 作用 | 当前状态 |
+|---|---|---|
+| `research_clarification_skill` | 多轮澄清、修改/跳过/取消/重启/确认、生成 Search Plan | 核心 |
+| `academic_search_skill` | 四源并发、独立重试、10 秒总预算、缓存、熔断、标准化与去重 | 核心 |
+| `summary_skill` | LLM 摘要，失败时本地摘要降级 | 可用 |
+| `calculator_skill` | 不使用 `eval` 的安全四则运算 | 可用 |
+| `echo_skill` | 路由和 Skill 接口演示 | 可用 |
 
-### 推荐配置二：硅基流动 (SiliconFlow) 平台（注册即送大量免费额度）
-*   **接口秘钥 (API Key)**：粘贴你注册硅基流动后在个人控制台生成的密钥。
-*   **接口基础路径 (Base URL)**：`https://api.siliconflow.cn/v1`
-*   **模型名称 (Model)**：`Qwen/Qwen2.5-7B-Instruct` (推荐通义千问)
+Skill 由 `app/services/discovery.py` 自动发现。新增规范见
+[`docs/SKILL_DEVELOPMENT_STANDARD.md`](docs/SKILL_DEVELOPMENT_STANDARD.md)。
 
-### 推荐配置三：Ollama 本地部署模型（100% 免费，断网可用）
-*   **接口秘钥 (API Key)**：随便填（如 `ollama`），本地不需要鉴权。
-*   **接口基础路径 (Base URL)**：`http://localhost:11434/v1`
-*   **模型名称 (Model)**：`qwen2.5:7b` (根据你本地 pull 的模型填写)
+## 学术检索 CLI、代理和可靠性
 
-*填入后点击“保存并应用配置”，后台会自动升级为“智能路由”状态，并加密脱敏显示 Key。*
+安装：
 
----
-
-## 🧩 如何新增一个自定义 Skill？
-
-增加新技能采用**零侵入式设计**，你**完全不需要**修改任何 API 路由代码，也不用修改任何前端网页代码。
-
-### 步骤 1：在 `app/services/skills/` 目录下创建技能文件
-例如，创建一个翻译技能文件 `translation.py`，继承自 `BaseSkill`，并定义它的 Pydantic 输入参数 Schema：
-
-```python
-# app/services/skills/translation.py
-import time
-from typing import Dict, Any
-from pydantic import BaseModel, Field
-from app.services.skills.base import BaseSkill, SkillResult
-
-# 1. 定义该 Skill 需要接收的输入参数（系统会自动将其转换为 schema 传给 Agent 决策）
-class TranslationInput(BaseModel):
-    text: str = Field(..., description="需要翻译的源文本内容")
-    target_lang: str = Field(default="英文", description="目标语言，如：英文、中文、日文")
-
-# 2. 编写技能类
-class TranslationSkill(BaseSkill):
-    name = "translation_skill"                          # 技能唯一ID（小写字母加下划线）
-    display_name = "智能翻译器"                        # 网页上展示的名字
-    description = "将输入的文本翻译成指定的目标语言。"  # 技能功能描述（Agent根据此描述决定是否调用）
-    input_schema = TranslationInput
-
-    async def execute(self, params: Dict[str, Any]) -> SkillResult:
-        start_time = time.perf_counter()
-        try:
-            validated = self.input_schema(**params)
-            
-            # 这里写你技能的具体业务逻辑，比如调用翻译 API 或规则翻译
-            result_text = f"已将 '{validated.text}' 翻译为 {validated.target_lang}"
-            
-            duration = (time.perf_counter() - start_time) * 1000.0
-            return SkillResult(
-                success=True,
-                skill_name=self.name,
-                data={"result": result_text},
-                duration_ms=duration
-            )
-        except Exception as e:
-            duration = (time.perf_counter() - start_time) * 1000.0
-            return SkillResult(success=False, skill_name=self.name, data=None, error=str(e), duration_ms=duration)
-```
-
-### 步骤 2：在技能包注册表里注册该技能
-打开 `app/services/skills/__init__.py`，导入你刚写好的技能，并进行实例化与注册：
-
-```python
-# app/services/skills/__init__.py
-from app.services.skills.translation import TranslationSkill  # 1. 导入
-from app.services.registry import registry
-
-# ... 其他技能实例化 ...
-translation_skill = TranslationSkill()                        # 2. 实例化
-
-# ... 其他技能注册 ...
-registry.register(translation_skill)                          # 3. 注册生效
-```
-
-保存文件，重启服务并刷新浏览器。新技能将自动出现在左侧技能库中，并无缝加入 Agent 的智能分发大脑中。
-
----
-
-## 🧪 运行回归测试
-
-我们提供了基于 `pytest` 的完整自动化单元测试及集成测试用例，运行以下命令即可：
-```bash
-python -m pytest
-```
-测试会自动模拟规则分发、计算器除零边界值防御、本地配置降级等 14 项完整场景，确保系统的稳定健壮。
-
----
-
-## 🔬 科研 Skill 实验台
-
-新增两个可迁移到团队 Agent Kernel 的 Skill：
-
-1. **科研需求确认**：采用“规则控流程 + LLM 个性化追问”的混合模式。后端固定保存五项研究状态（领域、核心问题、数据/方法、约束、交付物）并决定下一字段和完成条件；配置 API 后，LLM 仅负责生成贴合当前状态的下一问、3 条推荐选项和简短解释。用户表达“不知道、请推荐”时，模型可给出当前字段的具体建议；无 API、超时或模型返回不合法时，会自动降级到固定问题和选项，不中断会话。
-2. **受限学术检索**：仅调用 `arxiv`、`semantic`、`openalex`、`crossref` 四个来源，不执行泛网页搜索。单源故障或超时会明确返回错误，不伪造论文结果。
-
-学术检索采用 [openags/paper-search-mcp](https://github.com/openags/paper-search-mcp) 的 CLI 适配层。首次使用前，在已安装 `uv` 的环境执行：
-
-```bash
+```powershell
 uv tool install paper-search-mcp
+paper-search --help
 ```
 
-未安装 CLI 时，网页会显示安装提示；需求确认 Skill 仍可正常演示。执行测试：
+`paper-search` 子进程会继承标准代理变量：
 
-科研流程现已覆盖：**需求澄清 → 研究计划 → 受限检索 → 论文证据卡片**。澄清完成会返回题目、目标、基线、指标、两周 MVP、风险和检索词组成的研究计划；论文证据卡片可在左侧 Skill 库手动选择并粘贴标题、链接、arXiv ID 或摘要。没有摘要/正文时只返回明确的元数据降级卡片，绝不虚构实验结论；完整正文读取需另行配置外部工具。
-
-```bash
-python -m pytest
+```powershell
+$env:HTTP_PROXY='http://127.0.0.1:7890'
+$env:HTTPS_PROXY='http://127.0.0.1:7890'
+python run.py
 ```
+
+四个来源并行执行，并采用来源独立 timeout/retry/circuit policy。整体调用受 10 秒截止时间约束；单源失败不会取消其他来源；成功缓存默认 12 小时，空结果缓存 5 分钟，实时失败可返回明确标记的过期缓存。CLI 缺失、鉴权失败、超时、限流和无效输出都会形成结构化来源状态，不会伪造论文。
+
+注意：国内网络下 arXiv 或 Semantic Scholar 是否可达属于部署网络条件。产品正确行为不是无限等待，而是在总预算内给出每源状态并保留其他可用来源结果。
+
+## 模型配置与持久化
+
+页面可设置 OpenAI-compatible Base URL、Model 和 API Key。v1 配置接口采用 `keep / replace / clear` 语义，避免把掩码误存为新 Key。API Key 使用 Fernet 加密后写入 SQLite；主密钥首次保存时生成在项目根目录 `.env`。
+
+可参考 [`.env.example`](.env.example)。远程 Base URL 只允许 HTTPS；HTTP 只允许 `localhost`、`127.0.0.1` 或 `::1`。
+
+不要提交真实 `.env`、数据库或 API Key。丢失 `CODE_NAVI_CONFIG_KEY` 后，已加密的 Key 无法恢复，只能清除并重新保存。
+
+## API v1
+
+主要端点：
+
+- `GET /api/v1/skills`
+- `POST /api/v1/chat`
+- `POST /api/v1/skills/{skill_name}/execute`
+- `GET /api/v1/research/sessions/{session_id}`
+- `POST /api/v1/research/sessions/{session_id}/cancel`
+- `GET/PATCH /api/v1/config`
+- `POST /api/v1/config/test-llm`
+- `POST /api/v1/config/test-academic-sources`
+
+v1 统一返回 `schema_version`、`request_id`、`status`、`data`、`error` 和 `meta`。响应头 `X-Request-ID` 与 Envelope 一致。旧 `/api/*` 暂时保留兼容，但新开发应只使用 `/api/v1/*`。
+
+## 测试与验收
+
+离线自动测试不会访问真实互联网：
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE='1'
+python -m pytest -q -p no:cacheprovider
+python scripts/verify_mvp.py
+node --check static/app.js
+```
+
+完整人工步骤和预期结果见
+[`ACCEPTANCE_CHECKLIST.md`](ACCEPTANCE_CHECKLIST.md)。
+
+## 已知边界
+
+- 当前前端是便于后续搬迁的原生模块化静态页面，不是最终平台前端。
+- 会话保存在本机 SQLite，尚未实现账号级、多设备历史同步。
+- CLI 本身对各上游 API 的能力差异仍存在；应用层负责隔离故障、规范结果和透明展示。
+- 当前没有部署级鉴权与分布式限流，不能直接暴露到公网；接入最终平台时应复用平台网关、身份认证和审计能力。

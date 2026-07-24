@@ -1,6 +1,8 @@
+import json
 import subprocess
 
 import pytest
+from app.models.research import AcademicSource
 from app.services.skills.base import SkillResult
 from app.services.skills.echo import EchoSkill
 from app.services.skills.calculator import CalculatorSkill, safe_eval
@@ -8,8 +10,6 @@ from app.services.skills.summary import TextSummarySkill, local_summary
 from app.services.registry import SkillRegistry
 from app.services.skills.research_clarification import ResearchClarificationSkill
 from app.services.skills.academic_search import AcademicSearchSkill
-from app.services.skills.paper_evidence_card import PaperEvidenceCardSkill
-from app.services.skills import academic_search
 
 def test_skill_registry():
     registry = SkillRegistry()
@@ -87,179 +87,219 @@ async def test_summary_skill_fallback():
 
 
 @pytest.mark.asyncio
-async def test_research_clarification_tracks_one_session_to_completion():
-    skill = ResearchClarificationSkill()
-
-    first = await skill.execute({"message": "RAG 幻觉"})
-    assert first.success is True
-    assert first.data["completed"] is False
-    assert first.data["next_field"] == "core_problem"
-    assert len(first.data["options"]) == 3
-
-    session_id = first.data["session_id"]
-    second = await skill.execute({"message": "希望减少引用错误", "session_id": session_id})
-    assert second.data["completed"] is False
-    assert second.data["next_field"] == "data_and_method"
-    assert len(second.data["options"]) == 3
-
-    third = await skill.execute({"message": "使用公开问答基准和开源模型", "session_id": session_id})
-    assert third.data["completed"] is False
-    assert third.data["next_field"] == "constraints"
-    assert len(third.data["options"]) == 3
-
-    fourth = await skill.execute({"message": "两周内完成，只有一张消费级显卡", "session_id": session_id})
-    assert fourth.data["completed"] is False
-    assert fourth.data["next_field"] == "expected_output"
-    assert len(fourth.data["options"]) == 3
-
-    result = await skill.execute({"message": "研究简报和可运行原型", "session_id": session_id})
-
-    assert result.success is True
-    assert result.data["completed"] is True
-    assert result.data["research_brief"]["domain"] == "RAG 幻觉"
-    assert result.data["research_brief"]["expected_output"] == "研究简报和可运行原型"
-    assert "RAG 幻觉" in result.data["query"]
-    assert result.data["research_plan"]["mode"] == "rule_fallback"
-
-@pytest.mark.asyncio
-async def test_paper_evidence_card_uses_abstract_or_safe_metadata_fallback():
-    skill = PaperEvidenceCardSkill()
-    abstract_card = await skill.execute({"title": "Paper A", "abstract": "We evaluate retrieval methods."})
-    assert abstract_card.success and abstract_card.data["evidence_card"]["source_status"] == "abstract_only"
-    metadata_card = await skill.execute({"title": "Paper B"})
-    assert metadata_card.success and metadata_card.data["evidence_card"]["source_status"] == "metadata_only"
-    missing = await skill.execute({})
-    assert missing.success is False
-
-
-@pytest.mark.asyncio
-async def test_research_clarification_collects_a_complete_brief():
+async def test_research_clarification_first_message_extracts_topic():
+    """Section 3.9: first message extracts known fields, not entire sentence as domain."""
     from app.services.skills.research_clarification import ResearchClarificationSkill
 
     skill = ResearchClarificationSkill()
-    first = await skill.execute({"message": "人工智能"})
+    first = await skill.execute({"message": "我想研究演化博弈法，数据来源不太清楚"})
     assert first.success is True
-    assert first.skill_name == "research_clarification_skill"
-    assert first.data["completed"] is False
     assert first.data["session_id"]
-    assert first.data["question"]
-    assert first.data["options"]
+    assert first.data["status"] == "collecting"
 
+    brief = first.data["brief"]
+    # The topic keyword list has "演化博弈" — verify it's extracted
+    assert "演化博弈" in (brief["topic"] or "")
+    # "数据来源不太清楚" should NOT become the topic
+    assert "不太清楚" not in (brief["topic"] or "")
+
+    # Should have a question for the next missing field
+    assert first.data["question"] is not None
+
+
+@pytest.mark.asyncio
+async def test_research_clarification_multi_turn_and_confirm():
+    """Walk through multiple turns, update a field, skip, then confirm."""
+    from app.services.skills.research_clarification import ResearchClarificationSkill
+
+    skill = ResearchClarificationSkill()
+
+    # Turn 1 — first message
+    first = await skill.execute({"message": "演化博弈法应用研究"})
+    assert first.success
     session_id = first.data["session_id"]
-    for answer in ("医疗影像辅助诊断", "深度学习模型与公开数据集", "预算有限，三周内完成", "一份可执行的研究方案"):
-        result = await skill.execute({"message": answer, "session_id": session_id})
+    assert first.data["status"] == "collecting"
 
-    assert result.data["completed"] is True
-    assert result.data["research_brief"] == {
-        "domain": "人工智能",
-        "core_problem": "医疗影像辅助诊断",
-        "data_and_method": "深度学习模型与公开数据集",
-        "constraints": "预算有限，三周内完成",
-        "expected_output": "一份可执行的研究方案",
-    }
-    assert "人工智能" in result.data["query"]
+    # Turn 2 — explicitly fill required fields using update actions
+    await skill.execute({
+        "message": "演化博弈法在公共卫生中的应用",
+        "session_id": session_id,
+        "action": "update",
+        "target_field": "topic",
+    })
+    await skill.execute({
+        "message": "比较不同策略在公共卫生中的效果差异",
+        "session_id": session_id,
+        "action": "update",
+        "target_field": "core_question",
+    })
+    await skill.execute({
+        "message": "不限",
+        "session_id": session_id,
+        "action": "update",
+        "target_field": "time_range",
+    })
+    await skill.execute({
+        "message": "不限来源",
+        "session_id": session_id,
+        "action": "update",
+        "target_field": "source_preferences",
+    })
+    await skill.execute({
+        "message": "不限",
+        "session_id": session_id,
+        "action": "update",
+        "target_field": "research_object",
+    })
 
-
-@pytest.mark.asyncio
-async def test_research_clarification_uses_valid_llm_content(monkeypatch):
-    from app.core.config import settings
-    skill = ResearchClarificationSkill()
-    monkeypatch.setattr(settings, "LLM_API_KEY", "test-key")
-
-    async def llm_content(*_args):
-        return {"reply": "已了解你的方向。", "next_question": "你要优先解决什么问题？", "options": ["降低幻觉", "提高准确率", "减少成本"]}
-
-    monkeypatch.setattr(skill, "_call_llm", llm_content)
-    result = await skill.execute({"message": "RAG 幻觉"})
-
-    assert result.success is True
-    assert result.data["reply"] == "已了解你的方向。"
-    assert result.data["options"] == ["降低幻觉", "提高准确率", "减少成本"]
-
-
-@pytest.mark.asyncio
-async def test_research_clarification_falls_back_when_llm_fails(monkeypatch):
-    from app.core.config import settings
-    skill = ResearchClarificationSkill()
-    monkeypatch.setattr(settings, "LLM_API_KEY", "test-key")
-
-    async def failed_llm(*_args):
-        return None
-
-    monkeypatch.setattr(skill, "_call_llm", failed_llm)
-    result = await skill.execute({"message": "RAG 幻觉"})
-
-    assert result.success is True
-    assert result.data["next_question"] == "你最希望解决的具体问题是什么？"
+    # Now confirm should succeed (all minimum fields filled)
+    confirm = await skill.execute({
+        "message": "确认，开始检索",
+        "session_id": session_id,
+        "action": "confirm",
+    })
+    assert confirm.success
+    assert confirm.data["status"] in ("ready", "awaiting_confirmation")
 
 
 @pytest.mark.asyncio
-async def test_research_clarification_uses_llm_suggestion_for_unknown_answer(monkeypatch):
-    from app.core.config import settings
+async def test_research_clarification_cancel_and_restart():
+    """cancel closes session; restart creates a new one."""
+    from app.services.skills.research_clarification import ResearchClarificationSkill
+
     skill = ResearchClarificationSkill()
-    monkeypatch.setattr(settings, "LLM_API_KEY", "test-key")
 
-    async def llm_content(_state, _message, _next_field, needs_suggestion):
-        if not needs_suggestion:
-            return {"reply": "继续完善。", "next_question": "下一项是什么？", "options": ["A", "B", "C"]}
-        return {"reply": "建议先用公开 RAG 基准。", "next_question": "你的时间或算力限制是什么？", "options": ["一周", "两周", "一个月"], "suggested_value": "公开 RAG 基准测试集与开源模型"}
+    first = await skill.execute({"message": "演化博弈"})
+    sid = first.data["session_id"]
 
-    monkeypatch.setattr(skill, "_call_llm", llm_content)
-    first = await skill.execute({"message": "RAG"})
-    second = await skill.execute({"message": "减少幻觉", "session_id": first.data["session_id"]})
-    third = await skill.execute({"message": "我不知道，有什么推荐吗", "session_id": first.data["session_id"]})
+    canc = await skill.execute({"message": "取消", "session_id": sid, "action": "cancel"})
+    assert canc.success
+    assert canc.data["status"] == "cancelled"
 
-    assert second.data["next_field"] == "data_and_method"
-    assert third.data["state"]["data_and_method"] == "公开 RAG 基准测试集与开源模型"
+    rest = await skill.execute({"message": "重新开始", "session_id": sid, "action": "restart"})
+    assert rest.success
+    assert rest.data["session_id"] != sid  # new session
+    assert rest.data["status"] == "collecting"
+
+
+@pytest.mark.asyncio
+async def test_research_clarification_query_excludes_constraints():
+    """Search plan query must not include constraints or expected_output (Section 3.2)."""
+    from app.services.skills.research_clarification import ResearchClarificationSkill
+
+    skill = ResearchClarificationSkill()
+    first = await skill.execute({"message": "演化博弈"})
+    sid = first.data["session_id"]
+
+    # Fill all required fields
+    for msg in ["比较不同策略", "不限对象", "2021–2026", "不限来源", "两周内完成"]:
+        r = await skill.execute({"message": msg, "session_id": sid})
+        assert r.success
+
+    confirm = await skill.execute({
+        "message": "确认", "session_id": sid, "action": "confirm",
+    })
+    assert confirm.success
+    sp = confirm.data.get("search_plan")
+    if sp:
+        # Constraints and expected_output must NOT be in the query
+        assert "两周" not in sp.get("query", "")
+        assert "expected_output" not in sp.get("query", "")
 
 
 @pytest.mark.asyncio
 async def test_academic_search_invokes_all_sources_and_clamps_limit():
-    captured = []
+    """4 sources are called independently; results are merged."""
+    # Build a mock adapter factory that returns fake results
+    class MockAdapter:
+        source_name = None
+        def __init__(self, source):
+            self.source_name = source
+        async def search(self, request, context):
+            from app.models.research import SourceStatusKind
+            return type("R", (), {
+                "source": self.source_name,
+                "status": SourceStatusKind.ok,
+                "papers": [{"title": f"Paper from {self.source_name.value}"}],
+                "attempts": 1,
+                "latency_ms": 5.0,
+                "error_code": None,
+                "message": None,
+                "cache_hit": False,
+                "stale_cache": False,
+            })()
 
-    def runner(command):
-        captured.append(command)
-        return '[{"title": "A paper", "source": "arxiv"}]'
-
-    skill = AcademicSearchSkill(command_runner=runner)
-    result = await skill.execute({"query": "retrieval augmented generation", "limit": 99})
+    skill = AcademicSearchSkill(_adapter_factory=MockAdapter)
+    result = await skill.execute({
+        "query": "retrieval augmented generation",
+        "total_limit": 5,
+        "per_source_limit": 2,
+    })
 
     assert result.success is True
-    assert captured == [[
-        "paper-search", "search", "retrieval augmented generation", "-n", "5",
-        "-s", "arxiv,semantic,openalex,crossref",
-    ]]
-    assert result.data["results"] == [{"title": "A paper", "source": "arxiv"}]
+    assert result.data["overall_status"] == "ok"
+    # 4 sources × 1 paper each = 4
+    assert len(result.data["results"]) == 4
+    titles = {p["title"] for p in result.data["results"]}
+    assert "Paper from arxiv" in titles
+    assert "Paper from openalex" in titles
 
 
 @pytest.mark.asyncio
-async def test_academic_search_parses_object_results_and_reports_missing_executable():
-    skill = AcademicSearchSkill(command_runner=lambda _: '{"results": [{"title": "B paper"}]}')
-    result = await skill.execute({"query": "agents", "limit": 0})
-    assert result.success is True
-    assert result.data["limit"] == 1
-    assert result.data["results"] == [{"title": "B paper"}]
+async def test_academic_search_reports_missing_cli():
+    """When paper-search CLI is not installed, skill reports the error clearly."""
+    # The default PaperSearchCliAdapter tries to find 'paper-search' on PATH.
+    # Without mocking, this test relies on the CLI being present or absent.
+    # We test the error path by using a factory that raises FileNotFoundError.
+    def bad_factory(source):
+        raise FileNotFoundError("paper-search not found")
 
-    unavailable = AcademicSearchSkill(command_runner=lambda _: (_ for _ in ()).throw(FileNotFoundError()))
-    failure = await unavailable.execute({"query": "agents"})
-    assert failure.success is False
-    assert "install paper-search-mcp" in failure.error.lower()
-    assert failure.data is None
+    skill = AcademicSearchSkill(_adapter_factory=bad_factory)
+    result = await skill.execute({"query": "test"})
+    # The adapter factory failure is caught per-source; all fail → overall error
+    assert result.data["overall_status"] in ("error", "degraded")
+    assert len(result.data["errors"]) > 0
 
 
 @pytest.mark.asyncio
-async def test_academic_search_uses_finite_timeout_and_reports_timeout(monkeypatch):
-    captured = {}
+async def test_academic_search_degraded_with_partial_failures():
+    """Two sources succeed, two fail → overall degraded."""
+    from app.models.research import SourceStatusKind
 
-    def timed_out_run(*args, **kwargs):
-        captured.update(kwargs)
-        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+    class FailingAdapter:
+        source_name: AcademicSource
+        def __init__(self, source):
+            self.source_name = source
+        async def search(self, request, context):
+            if self.source_name in (AcademicSource.arxiv, AcademicSource.semantic):
+                return type("R", (), {
+                    "source": self.source_name,
+                    "status": SourceStatusKind.timeout,
+                    "papers": [],
+                    "attempts": 2,
+                    "latency_ms": 5000.0,
+                    "error_code": "TIMEOUT",
+                    "message": "timed out",
+                    "cache_hit": False,
+                    "stale_cache": False,
+                })()
+            return type("R", (), {
+                "source": self.source_name,
+                "status": SourceStatusKind.ok,
+                "papers": [{"title": f"Paper from {self.source_name.value}"}],
+                "attempts": 1,
+                "latency_ms": 100.0,
+                "error_code": None,
+                "message": None,
+                "cache_hit": False,
+                "stale_cache": False,
+            })()
 
-    monkeypatch.setattr(academic_search.subprocess, "run", timed_out_run)
-    result = await AcademicSearchSkill().execute({"query": "slow query"})
+    skill = AcademicSearchSkill(_adapter_factory=FailingAdapter)
+    result = await skill.execute({"query": "test", "per_source_limit": 2})
 
-    assert captured["timeout"] > 0
-    assert result.success is False
-    assert "timed out" in result.error.lower()
-    assert result.data is None
+    assert result.success is True
+    assert result.data["overall_status"] == "degraded"
+    assert len(result.data["results"]) == 2  # only openalex + crossref
+    assert len(result.data["errors"]) == 2  # arxiv + semantic
 

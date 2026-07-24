@@ -2,13 +2,14 @@ import time
 import re
 import httpx
 from typing import Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from app.services.skills.base import BaseSkill, SkillResult
 from app.core.config import settings
 
 class SummaryInput(BaseModel):
-    text: str = Field(..., description="The long text document to summarize.")
-    max_sentences: int = Field(default=3, description="Maximum number of sentences for the summary.")
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(..., min_length=1, max_length=50_000, description="The long text document to summarize.")
+    max_sentences: int = Field(default=3, ge=1, le=10, description="Maximum number of sentences for the summary.")
 
 def local_summary(text: str, max_sentences: int = 3) -> str:
     # Simple sentence splitting using regex
@@ -51,8 +52,9 @@ class TextSummarySkill(BaseSkill):
                 }
                 url = f"{settings.LLM_BASE_URL}/chat/completions"
                 
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(url, json=payload, headers=headers, timeout=10.0)
+                try:
+                    async with httpx.AsyncClient() as client:
+                        response = await client.post(url, json=payload, headers=headers, timeout=10.0)
                     if response.status_code == 200:
                         data = response.json()
                         summary = data["choices"][0]["message"]["content"].strip()
@@ -63,16 +65,21 @@ class TextSummarySkill(BaseSkill):
                             data={"summary": summary, "mode": "大模型 (LLM API)"},
                             duration_ms=duration
                         )
-                    else:
-                        # Fallback if API fails
-                        fallback = local_summary(validated.text, validated.max_sentences)
-                        duration = (time.perf_counter() - start_time) * 1000.0
-                        return SkillResult(
-                            success=True,
-                            skill_name=self.name,
-                            data={"summary": fallback, "mode": "本地降级 (模型请求失败)"},
-                            duration_ms=duration
-                        )
+                    failure_reason = f"HTTP {response.status_code}"
+                except Exception as exc:
+                    failure_reason = type(exc).__name__
+                fallback = local_summary(validated.text, validated.max_sentences)
+                duration = (time.perf_counter() - start_time) * 1000.0
+                return SkillResult(
+                    success=True,
+                    skill_name=self.name,
+                    data={
+                        "summary": fallback,
+                        "mode": "本地降级 (模型请求失败)",
+                        "warning": failure_reason,
+                    },
+                    duration_ms=duration
+                )
             else:
                 # No API key configured, use local fallback
                 fallback = local_summary(validated.text, validated.max_sentences)

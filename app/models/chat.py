@@ -2,9 +2,11 @@ from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional, List
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., description="The user prompt or query.")
+    message: str = Field(..., min_length=1, max_length=20_000, description="The user prompt or query.")
     preferred_skill: Optional[str] = Field(None, description="Manually force the use of a specific skill.")
     session_id: Optional[str] = Field(None, description="Optional multi-turn research session ID.")
+    action: Optional[str] = Field(None, description="Research workflow action.")
+    target_field: Optional[str] = Field(None, description="Research field changed by update/skip.")
 
 class ChatResponse(BaseModel):
     request_id: str = Field(..., description="Unique transaction ID for this chat request.")

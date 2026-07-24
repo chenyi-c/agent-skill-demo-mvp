@@ -16,6 +16,7 @@ class BaseSkill(ABC):
     version: str = "1.0.0"
     enabled: bool = True
     input_schema: Type[BaseModel]
+    output_schema: Type[BaseModel] | None = None
 
     @abstractmethod
     async def execute(self, params: Dict[str, Any]) -> SkillResult:
