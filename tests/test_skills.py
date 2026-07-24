@@ -119,7 +119,7 @@ async def test_research_clarification_uses_llm_question_when_configured(monkeypa
     from app.core.config import settings
     skill = ResearchClarificationSkill()
     monkeypatch.setattr(settings, "LLM_API_KEY", "test-key")
-    def generated_question(_brief, _question):
+    async def generated_question(_brief, _question):
         return {"field": "objective", "text": "针对 RAG，你最想先降低哪类幻觉？", "reason": "便于限定检索范围", "options": [{"label": "引用错误", "value": "减少引用错误"}, {"label": "检索错误", "value": "减少检索错误"}, {"label": "自己描述", "value": "__free__"}], "allow_free_text": True, "allow_skip": True}
     monkeypatch.setattr(skill, "_llm_question", generated_question)
     result = await skill.execute({"message": "我想研究 RAG"})
